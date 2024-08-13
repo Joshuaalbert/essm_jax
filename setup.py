@@ -6,7 +6,7 @@ from setuptools import setup
 install_requires = [
     'jax',
     'jaxlib',
-    'numpy',
+    'numpy<2',
     'tensorflow_probability'
 ]
 
