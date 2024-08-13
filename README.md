@@ -3,6 +3,8 @@
 Given a potentially non-linear state space model this allows you to solve the forward and backward inference steps, for
 linear space space models this is equivalent to the Kalman and Rauch-Tung-Striebel recursions.
 
+Support for Python 3.10+.
+
 ## Example
 
 All you need to do is define the transition and observation functions, and the initial state prior. These are all in
