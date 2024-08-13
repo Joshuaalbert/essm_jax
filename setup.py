@@ -6,7 +6,7 @@ from setuptools import setup
 install_requires = [
     'jax',
     'jaxlib',
-    'numpy',
+    'numpy<2',
     'tensorflow_probability'
 ]
 
@@ -32,5 +32,5 @@ setup(name='essm_jax',
           "License :: OSI Approved :: Apache Software License",
           "Operating System :: OS Independent",
       ],
-      python_requires='>=3.9',
+      python_requires='>3.9',
       )
