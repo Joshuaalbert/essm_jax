@@ -85,3 +85,17 @@ plt.plot(forward_samples.t, forward_samples.observation[:, 0], label='forward_si
 plt.legend()
 plt.show()
 ```
+
+# Change Log
+
+13 August 2024: Initial release 1.0.0.
+
+## Star History
+
+<a href="https://star-history.com/#joshuaalbert/jaxns&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=joshuaalbert/essm_jax&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=joshuaalbert/essm_jax&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=joshuaalbert/essm_jax&type=Date" />
+  </picture>
+</a>
