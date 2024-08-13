@@ -286,19 +286,22 @@ def test_essm_forward_simulation():
         mask=mask
     )
 
-    import pylab as plt
+    try:
+        import pylab as plt
 
-    plt.plot(samples.t, samples.latent[:, 0], label='latent')
-    plt.plot(filter_result.t, filter_result.filtered_mean[:, 0], label='filtered latent')
-    plt.plot(forward_samples.t, forward_samples.latent[:, 0], label='forward_simulated latent')
-    plt.legend()
-    plt.show()
+        plt.plot(samples.t, samples.latent[:, 0], label='latent')
+        plt.plot(filter_result.t, filter_result.filtered_mean[:, 0], label='filtered latent')
+        plt.plot(forward_samples.t, forward_samples.latent[:, 0], label='forward_simulated latent')
+        plt.legend()
+        plt.show()
 
-    plt.plot(samples.t, samples.observation[:, 0], label='observation')
-    plt.plot(filter_result.t, filter_result.observation_mean[:, 0], label='filtered obs')
-    plt.plot(forward_samples.t, forward_samples.observation[:, 0], label='forward_simulated obs')
-    plt.legend()
-    plt.show()
+        plt.plot(samples.t, samples.observation[:, 0], label='observation')
+        plt.plot(filter_result.t, filter_result.observation_mean[:, 0], label='filtered obs')
+        plt.plot(forward_samples.t, forward_samples.observation[:, 0], label='forward_simulated obs')
+        plt.legend()
+        plt.show()
+    except ImportError:
+        pass
 
 
 def test__efficienct_add_scalar_diag():
