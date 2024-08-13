@@ -1,6 +1,6 @@
 import dataclasses
 import warnings
-from typing import Callable, Any
+from typing import Callable, Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -32,7 +32,7 @@ class JVPLinearOp:
     This is a linear operator that represents the Jacobian of a function.
     """
     fn: Callable  # A function R^n -> R^m
-    primals: Any | None = None  # The primal value, i.e. where jacobian is evaluated
+    primals: Optional[Any] = None  # The primal value, i.e. where jacobian is evaluated
     more_outputs_than_inputs: bool = False  # If True, the operator is tall, i.e. m > n
     adjoint: bool = False  # If True, the operator is transposed
     promote_dtypes: bool = False  # If True, promote dtypes to match primal during JVP, and cotangent to match primal_out during VJP
