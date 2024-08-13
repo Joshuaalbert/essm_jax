@@ -226,7 +226,7 @@ class ExtendedStateSpaceModel:
 
     def forward_filter(self, observations: jax.Array, mask: Optional[jax.Array] = None,
                        marginal_likelihood_only: bool = False,
-                       t0: Union[jax.Array, int] = 0) -> FilterResult | jax.Array:
+                       t0: Union[jax.Array, int] = 0) -> Union[FilterResult, jax.Array]:
         """
         Run the forward filtering pass, computing the total marginal likelihood
 
