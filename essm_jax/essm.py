@@ -1,7 +1,7 @@
 """Extended Gaussian State Space Model."""
 
 import dataclasses
-from typing import Callable, NamedTuple, Tuple, Union
+from typing import Callable, NamedTuple, Tuple, Union, Optional
 
 import jax
 import jax.numpy as jnp
@@ -52,7 +52,7 @@ class InitialPrior(NamedTuple):
     covariance: jax.Array  # [latent_size, latent_size] The covariance of the initial state
 
 
-def _efficient_add_scalar_diag(A: jax.Array, c: jax.Array | float) -> jax.Array:
+def _efficient_add_scalar_diag(A: jax.Array, c: Union[jax.Array, float]) -> jax.Array:
     """
     Efficiently add a scalar to the diagonal of a matrix.
 
@@ -116,7 +116,7 @@ class ExtendedStateSpaceModel:
 
         return JVPLinearOp(_transition_fn, more_outputs_than_inputs=False)
 
-    def get_observation_jacobian(self, t: jax.Array, observation_size: int | None = None) -> JVPLinearOp:
+    def get_observation_jacobian(self, t: jax.Array, observation_size: Optional[int] = None) -> JVPLinearOp:
         def _observation_fn(z):
             return self.observation_fn(z, t).mean()
 
@@ -133,7 +133,7 @@ class ExtendedStateSpaceModel:
         Hop = self.get_observation_jacobian(t)
         return Hop(z).to_dense()
 
-    def sample(self, key, num_time: int, t0: jax.Array | int = 0) -> SampleResult:
+    def sample(self, key, num_time: int, t0: Union[jax.Array, int] = 0) -> SampleResult:
         """
         Sample from the model.
 
@@ -175,7 +175,7 @@ class ExtendedStateSpaceModel:
 
         return samples
 
-    def _check_shapes(self, observations: jax.Array, mask: jax.Array | None = None):
+    def _check_shapes(self, observations: jax.Array, mask: Optional[jax.Array] = None):
         """
         Check the shapes of the observations and mask.
 
@@ -197,7 +197,7 @@ class ExtendedStateSpaceModel:
                 raise ValueError('mask and observations must have the same length')
 
     def forward_simulate(self, key: jax.Array, num_time: int,
-                         observations: jax.Array, mask: jax.Array | None = None) -> SampleResult:
+                         observations: jax.Array, mask: Optional[jax.Array] = None) -> SampleResult:
         """
         Simulate from the model, from the end of the forward filtering pass.
 
@@ -224,9 +224,9 @@ class ExtendedStateSpaceModel:
         )
         return new_essm.sample(key=key, num_time=num_time, t0=filter_result.t[-1])
 
-    def forward_filter(self, observations: jax.Array, mask: jax.Array | None = None,
+    def forward_filter(self, observations: jax.Array, mask: Optional[jax.Array] = None,
                        marginal_likelihood_only: bool = False,
-                       t0: jax.Array | int = 0) -> FilterResult | jax.Array:
+                       t0: Union[jax.Array, int] = 0) -> FilterResult | jax.Array:
         """
         Run the forward filtering pass, computing the total marginal likelihood
 
@@ -379,7 +379,7 @@ class ExtendedStateSpaceModel:
             return final_accumulate.log_cumulative_marginal_likelihood
         return filter_results
 
-    def log_prob(self, observations: jax.Array, mask: jax.Array | None = None) -> jax.Array:
+    def log_prob(self, observations: jax.Array, mask: Optional[jax.Array] = None) -> jax.Array:
         """
         Compute the log probability of the observations under the model.
 
@@ -392,8 +392,8 @@ class ExtendedStateSpaceModel:
         """
         return self.forward_filter(observations, mask, marginal_likelihood_only=True)
 
-    def posterior_marginals(self, observations: jax.Array, mask: jax.Array | None = None,
-                            t0: jax.Array | int = 0) -> Union[
+    def posterior_marginals(self, observations: jax.Array, mask: Optional[jax.Array] = None,
+                            t0: Union[jax.Array, int] = 0) -> Union[
         SmoothingResult, Tuple[SmoothingResult, InitialPrior]]:
         """
         Compute the posterior marginal distributions of the latents, p(z[t] | x[:T]).
