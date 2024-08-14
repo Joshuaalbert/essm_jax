@@ -36,6 +36,13 @@ class FilterResult(NamedTuple):
     observation_cov: jax.Array  # [num_timesteps, observation_size, observation_size] The covariance of p(x[t] | x[:t-1])
 
 
+class IncrementalFilterState(NamedTuple):
+    t: jax.Array  # the time index
+    log_cumulative_marginal_likelihood: jax.Array  # log marginal likelihood prod_t p(x[t] | x[:t-1])
+    filtered_mean: jax.Array  # [latent_size] mean of p(z[t+1] | x[:t])
+    filtered_cov: jax.Array  # [latent_size, latent_size] covariance of p(z[t+1] | x[:t])
+
+
 class SmoothingResult(NamedTuple):
     """
     Represents the result of a backward smoothing pass.
@@ -90,12 +97,14 @@ class ExtendedStateSpaceModel:
             Must be a MultivariateNormalLinearOperator.
         more_data_than_params: If True, the observation function has more outputs than inputs.
         materialise_jacobians: If True, the Jacobians are materialised as dense matrices.
+        dt: The time step size, default is 1.
     """
     transition_fn: Callable[[jax.Array, jax.Array], tfpd.MultivariateNormalLinearOperator]
     observation_fn: Callable[[jax.Array, jax.Array], tfpd.MultivariateNormalLinearOperator]
     initial_state_prior: tfpd.MultivariateNormalLinearOperator
     more_data_than_params: bool = False
     materialise_jacobians: bool = False
+    dt: float = 1.
 
     def __post_init__(self):
         if not callable(self.transition_fn):
@@ -165,7 +174,7 @@ class ExtendedStateSpaceModel:
         init = self.initial_state_prior.sample(seed=init_key)
         xs = (
             jax.random.split(latent_key, num_time),
-            jnp.arange(1, num_time + 1) + t0
+            jnp.arange(1, num_time + 1) * self.dt + t0
         )
         _, samples = lax.scan(
             _sample_latents_op,
@@ -197,24 +206,34 @@ class ExtendedStateSpaceModel:
                 raise ValueError('mask and observations must have the same length')
 
     def forward_simulate(self, key: jax.Array, num_time: int,
-                         observations: jax.Array, mask: Optional[jax.Array] = None) -> SampleResult:
+                         filter_result: Union[FilterResult | IncrementalFilterState]) -> SampleResult:
         """
-        Simulate from the model, from the end of the forward filtering pass.
+        Simulate from the model, from the end of a forward filtering pass.
 
         Args:
             key: a PRNGKey
             num_time: the number of time steps to simulate
-            observations: [num_time, observation_size] array of observations
-            mask: [num_time] array of masks, True for missing observations
+            filter_result: the result of the forward filtering pass, or incremental filter update.
 
         Returns:
             sample result: num_time timesteps of forward simulated
         """
-        filter_result = self.forward_filter(observations, mask)
-        initial_state_prior = tfpd.MultivariateNormalTriL(
-            loc=filter_result.filtered_mean[-1],
-            scale_tril=jnp.linalg.cholesky(_efficient_add_scalar_diag(filter_result.filtered_cov[-1], 1e-6))
-        )
+        if isinstance(filter_result, FilterResult):
+            initial_state_prior = tfpd.MultivariateNormalTriL(
+                loc=filter_result.filtered_mean[-1],
+                scale_tril=lax.linalg.cholesky(_efficient_add_scalar_diag(filter_result.filtered_cov[-1], 1e-6),
+                                               symmetrize_input=False)
+            )
+            t0 = filter_result.t[-1]
+        elif isinstance(filter_result, IncrementalFilterState):
+            initial_state_prior = tfpd.MultivariateNormalTriL(
+                loc=filter_result.filtered_mean,
+                scale_tril=lax.linalg.cholesky(_efficient_add_scalar_diag(filter_result.filtered_cov, 1e-6),
+                                               symmetrize_input=False)
+            )
+            t0 = filter_result.t
+        else:
+            raise ValueError('filter_result must be a FilterResult or IncrementalFilter instance.')
         new_essm = ExtendedStateSpaceModel(
             transition_fn=self.transition_fn,
             observation_fn=self.observation_fn,
@@ -222,11 +241,142 @@ class ExtendedStateSpaceModel:
             more_data_than_params=self.more_data_than_params,
             materialise_jacobians=self.materialise_jacobians
         )
-        return new_essm.sample(key=key, num_time=num_time, t0=filter_result.t[-1])
+        return new_essm.sample(key=key, num_time=num_time, t0=t0)
+
+    def incremental_update(self, filter_state: IncrementalFilterState, observation: jax.Array,
+                           mask: Optional[jax.Array] = None) -> Tuple[
+        IncrementalFilterState, tfpd.MultivariateNormalLinearOperator]:
+        """
+        Perform an incremental update of the filter state. Does not advance the time index. I.e. produces
+
+        p(z[t] | x[:t]) from p(z[t] | x[:t-1]) and p(x[t] | x[:t-1])
+
+        Args:
+            filter_state: the current filter state
+            observation: [n] the observation at the current time
+            mask: scalar, the mask at the current time, True for missing observations
+
+        Returns:
+            the updated filter state, and the marginal distribution of the observation p(x[t] | x[:t-1])
+        """
+
+        Hop = self.get_observation_jacobian(t=filter_state.t, observation_size=observation.size)
+        H = Hop(filter_state.filtered_mean)
+        if self.materialise_jacobians:
+            H = H.to_dense()
+
+        # Update step, compute p(z[t] | x[:t]) from p(z[t] | x[:t-1])
+        observation_dist = self.observation_fn(filter_state.filtered_mean, filter_state.t)
+        R = observation_dist.covariance()
+        # Push-forward the prior (i.e. predictive) distribution to the observation space
+        x_expectation = observation_dist.mean()  # [observation_size]
+        tmp_H_P = H @ filter_state.filtered_cov
+        S = tmp_H_P @ H.T + R  # [observation_size, observation_size]
+        S_chol = lax.linalg.cholesky(S, symmetrize_input=False)  # [observation_size, observation_size]
+
+        marginal_dist = tfpd.MultivariateNormalTriL(x_expectation, S_chol)
+        # return_marginal = tfpd.MultivariateNormalFullCovariance(x_expectation, S)
+
+        # Compute the log marginal likelihood p(x[t] | x[:t-1])
+        log_marginal_likelihood = marginal_dist.log_prob(observation)
+
+        # Compute the Kalman gain
+        # K = predict_cov @ H.T @ inv(S) = predict_cov.T @ H.T @ inv(S)
+        K = hpsd_solve(S, tmp_H_P, cholesky_matrix=S_chol).T  # [latent_size, observation_size]
+
+        # Update the state estimate
+        filtered_mean = filter_state.filtered_mean + K @ (observation - x_expectation)  # [latent_size]
+
+        # Update the state covariance using Joseph's form to ensure positive semi-definite
+        # tmp_factor = (I - K @ H)
+        if self.more_data_than_params:
+            tmp_factor = _efficient_add_scalar_diag((- K) @ H, 1.)
+        else:
+            tmp_factor = _efficient_add_scalar_diag(K @ (-H), 1.)
+        filtered_cov = tmp_factor @ filter_state.filtered_cov @ tmp_factor.T + K @ R @ K.T  # [latent_size, latent_size]
+
+        # When masked, then the filtered state is the predicted state.
+        if mask is not None:
+            filtered_mean = lax.select(*jnp.broadcast_arrays(mask,
+                                                             filter_state.filtered_mean, filtered_mean))
+            filtered_cov = lax.select(*jnp.broadcast_arrays(mask,
+                                                            filter_state.filtered_cov, filtered_cov))
+            log_marginal_likelihood = lax.select(*jnp.broadcast_arrays(mask,
+                                                                       jnp.zeros_like(log_marginal_likelihood),
+                                                                       log_marginal_likelihood))
+
+        log_cumulative_marginal_likelihood = filter_state.log_cumulative_marginal_likelihood + log_marginal_likelihood
+        return IncrementalFilterState(
+            t=filter_state.t,
+            log_cumulative_marginal_likelihood=log_cumulative_marginal_likelihood,
+            filtered_mean=filtered_mean,
+            filtered_cov=filtered_cov
+        ), marginal_dist
+
+    def incremental_predict(self, filter_state: IncrementalFilterState) -> IncrementalFilterState:
+        """
+        Perform an incremental prediction step of the filter state, advancing the time index. I.e. produces
+
+        p(z[t+1] | x[:t]) from p(z[t] | x[:t])
+
+        Args:
+            filter_state: the current filter state
+
+        Returns:
+            the predicted filter state, with time index advanced
+        """
+        # Predict step, compute p(z[t+1] | x[:t])
+
+        t = filter_state.t + jnp.asarray(self.dt, filter_state.t.dtype)
+
+        Fop = self.get_transition_jacobian(t=t)
+        F = Fop(filter_state.filtered_mean)
+        if self.materialise_jacobians:
+            F = F.to_dense()
+
+        predicted_dist = self.transition_fn(filter_state.filtered_mean, t)
+        predicted_mean = predicted_dist.mean()  # [latent_size]
+        Q = predicted_dist.covariance()  # [latent_size, latent_size]
+        predicted_cov = F @ filter_state.filtered_cov @ F.T + Q  # [latent_size, latent_size]
+
+        return IncrementalFilterState(
+            t=t,
+            log_cumulative_marginal_likelihood=filter_state.log_cumulative_marginal_likelihood,
+            filtered_mean=predicted_mean,
+            filtered_cov=predicted_cov
+        )
+
+    def create_initial_filter_state(self, t0: Union[jax.Array, float] = 0.) -> IncrementalFilterState:
+        """
+        Create an incremental filter at the initial time.
+
+        Args:
+            t0: the time of prior state (before the first observation)
+
+        Returns:
+            the initial incremental filter state at the first possible observation time, i.e. t0+1.
+        """
+        # Push forward initial state to create p(z[1] | z[0])
+        t0 = jnp.asarray(t0, jnp.float32)
+        t1 = t0 + jnp.asarray(self.dt, t0.dtype)
+        init_predict_dist = self.transition_fn(self.initial_state_prior.mean(), t1)
+
+        init_Fop = self.get_transition_jacobian(t1)
+        init_F = init_Fop(self.initial_state_prior.mean())
+        if self.materialise_jacobians:
+            init_F = init_F.to_dense()
+        init_predicted_mean = init_predict_dist.mean()
+        init_predicted_cov = init_F @ self.initial_state_prior.covariance() @ init_F.T + init_predict_dist.covariance()
+        return IncrementalFilterState(
+            t=t1,
+            log_cumulative_marginal_likelihood=jnp.asarray(0.),
+            filtered_mean=init_predicted_mean,
+            filtered_cov=init_predicted_cov
+        )
 
     def forward_filter(self, observations: jax.Array, mask: Optional[jax.Array] = None,
                        marginal_likelihood_only: bool = False,
-                       t0: Union[jax.Array, int] = 0) -> Union[FilterResult, jax.Array]:
+                       t0: Union[jax.Array, float] = 0.) -> Union[FilterResult, jax.Array]:
         """
         Run the forward filtering pass, computing the total marginal likelihood
 
@@ -248,19 +398,13 @@ class ExtendedStateSpaceModel:
         """
         self._check_shapes(observations=observations, mask=mask)
 
-        class Carry(NamedTuple):
-            log_cumulative_marginal_likelihood: jax.Array  # log marginal likelihood
-            predicted_mean: jax.Array  # [latent_size] mean of p(z[t+1] | x[:t])
-            predicted_cov: jax.Array  # [latent_size, latent_size] covariance of p(z[t+1] | x[:t])
-
         class YType(NamedTuple):
             observation: jax.Array  # [observation_size] observation at time t
             mask: jax.Array  # mask at time t
-            t: jax.Array  # time index
 
         num_time = np.shape(observations)[0]
 
-        def _filter_op(carry: Carry, y: YType) -> Tuple[Carry, FilterResult]:
+        def _filter_op(filter_state: IncrementalFilterState, y: YType) -> Tuple[IncrementalFilterState, FilterResult]:
             """
             A single step of the forward equations.
             """
@@ -268,111 +412,38 @@ class ExtendedStateSpaceModel:
             # Note: We perform update FIRST, then predict which is contrary to the usual order.
             # This is so that the filter results naturally align with the smoothing operation.
 
-            Hop = self.get_observation_jacobian(t=y.t, observation_size=y.observation.size)
-            H = Hop(carry.predicted_mean)
-            if self.materialise_jacobians:
-                H = H.to_dense()
-
-            # Update step, compute p(z[t] | x[:t]) from p(z[t] | x[:t-1])
-            observation_dist = self.observation_fn(carry.predicted_mean, y.t)
-            R = observation_dist.covariance()
-            # Push-forward the prior (i.e. predictive) distribution to the observation space
-            x_expectation = observation_dist.mean()  # [observation_size]
-            tmp_H_P = H @ carry.predicted_cov
-            S = tmp_H_P @ H.T + R  # [observation_size, observation_size]
-            S_chol = jnp.linalg.cholesky(S)  # [observation_size, observation_size]
-
-            marginal_dist = tfpd.MultivariateNormalTriL(x_expectation, S_chol)
-
-            # Compute the log marginal likelihood p(x[t] | x[:t-1])
-            log_marginal_likelihood = marginal_dist.log_prob(y.observation)
-
-            # Compute the Kalman gain
-            # K = predict_cov @ H.T @ inv(S) = predict_cov.T @ H.T @ inv(S)
-            K = hpsd_solve(S, tmp_H_P, cholesky_matrix=S_chol).T  # [latent_size, observation_size]
-
-            # Update the state estimate
-            filtered_mean = carry.predicted_mean + K @ (y.observation - x_expectation)  # [latent_size]
-
-            # Update the state covariance using Joseph's form to ensure positive semi-definite
-            # tmp_factor = (I - K @ H)
-            if self.more_data_than_params:
-                tmp_factor = _efficient_add_scalar_diag((- K) @ H, 1.)
-            else:
-                tmp_factor = _efficient_add_scalar_diag(K @ (-H), 1.)
-            filtered_cov = tmp_factor @ carry.predicted_cov @ tmp_factor.T + K @ R @ K.T  # [latent_size, latent_size]
-
-            # When masked, then the filtered state is the predicted state.
-            if mask is not None:
-                filtered_mean = lax.select(*jnp.broadcast_arrays(y.mask,
-                                                                 carry.predicted_mean, filtered_mean))
-                filtered_cov = lax.select(*jnp.broadcast_arrays(y.mask,
-                                                                carry.predicted_cov, filtered_cov))
-                log_marginal_likelihood = lax.select(*jnp.broadcast_arrays(y.mask,
-                                                                           jnp.zeros_like(log_marginal_likelihood),
-                                                                           log_marginal_likelihood))
-
-            # Predict step, compute p(z[t+1] | x[:t])
-
-            Fop = self.get_transition_jacobian(t=y.t + 1)
-            F = Fop(filtered_mean)
-            if self.materialise_jacobians:
-                F = F.to_dense()
-
-            predicted_dist = self.transition_fn(filtered_mean, y.t + 1)
-            predicted_mean = predicted_dist.mean()  # [latent_size]
-            Q = predicted_dist.covariance()  # [latent_size, latent_size]
-            predicted_cov = F @ filtered_cov @ F.T + Q  # [latent_size, latent_size]
-
-            # Update cumulative marginal likelihood
-            log_cumulative_marginal_likelihood = carry.log_cumulative_marginal_likelihood + log_marginal_likelihood
-
-            return Carry(
-                log_cumulative_marginal_likelihood=log_cumulative_marginal_likelihood,
-                predicted_mean=predicted_mean,
-                predicted_cov=predicted_cov
-            ), FilterResult(
-                t=y.t,
-                log_cumulative_marginal_likelihood=log_cumulative_marginal_likelihood,
-                filtered_mean=filtered_mean,
-                filtered_cov=filtered_cov,
-                predicted_mean=predicted_mean,
-                predicted_cov=predicted_cov,
-                observation_mean=x_expectation,
-                observation_cov=S
+            updated_filter_state, marginal_dist = self.incremental_update(
+                filter_state=filter_state,
+                observation=y.observation,
+                mask=y.mask if mask is not None else None
             )
 
-        # Push forward initial state to create p(z[1] | z[0])
-        t0 = jnp.asarray(t0, jnp.int32)
-        t1 = t0 + jnp.asarray(1, jnp.int32)
-        init_predict_dist = self.transition_fn(self.initial_state_prior.mean(), t1)
+            # Predict step, compute p(z[t+1] | x[:t])
+            predicted_filter_state = self.incremental_predict(filter_state=updated_filter_state)
 
-        init_Fop = self.get_transition_jacobian(t1)
-        init_F = init_Fop(self.initial_state_prior.mean())
-        if self.materialise_jacobians:
-            init_F = init_F.to_dense()
-        init_predicted_mean = init_predict_dist.mean()
-        init_predicted_cov = init_F @ self.initial_state_prior.covariance() @ init_F.T + init_predict_dist.covariance()
+            return predicted_filter_state, FilterResult(
+                t=updated_filter_state.t,
+                log_cumulative_marginal_likelihood=updated_filter_state.log_cumulative_marginal_likelihood,
+                filtered_mean=updated_filter_state.filtered_mean,
+                filtered_cov=updated_filter_state.filtered_cov,
+                predicted_mean=predicted_filter_state.filtered_mean,
+                predicted_cov=predicted_filter_state.filtered_cov,
+                observation_mean=marginal_dist.mean(),
+                observation_cov=marginal_dist.covariance()
+            )
 
-        # init_predicted_mean = self.initial_state_prior.mean()
-        # init_predicted_cov = self.initial_state_prior.covariance()
-        init_result = Carry(
-            log_cumulative_marginal_likelihood=jnp.asarray(0.),
-            predicted_mean=init_predicted_mean,
-            predicted_cov=init_predicted_cov
-        )
+        filter_state = self.create_initial_filter_state(t0=t0)
         if mask is None:
             _mask = jnp.zeros(num_time, dtype=jnp.bool_)  # dummy variable (we skip the mask select)
         else:
             _mask = mask
         xs = YType(
             observation=observations,
-            mask=_mask,
-            t=jnp.arange(1, num_time + 1, dtype=jnp.int32) + t0
+            mask=_mask
         )
         final_accumulate, filter_results = lax.scan(
             f=_filter_op,
-            init=init_result,
+            init=filter_state,
             xs=xs
         )
         if marginal_likelihood_only:
@@ -393,7 +464,7 @@ class ExtendedStateSpaceModel:
         return self.forward_filter(observations, mask, marginal_likelihood_only=True)
 
     def posterior_marginals(self, observations: jax.Array, mask: Optional[jax.Array] = None,
-                            t0: Union[jax.Array, int] = 0) -> Union[
+                            t0: Union[jax.Array, float] = 0.) -> Union[
         SmoothingResult, Tuple[SmoothingResult, InitialPrior]]:
         """
         Compute the posterior marginal distributions of the latents, p(z[t] | x[:T]).
@@ -443,7 +514,8 @@ class ExtendedStateSpaceModel:
 
             # Compute the RTS smoother gain
             # J = y.filtered_cov @ F.T @ jnp.linalg.inv(y.predicted_cov)
-            predicted_cov_chol = jnp.linalg.cholesky(y.predicted_cov)  # Possibly need to add a small diagonal jitter
+            predicted_cov_chol = lax.linalg.cholesky(y.predicted_cov,
+                                                     symmetrize_input=False)  # Possibly need to add a small diagonal jitter
             tmp_F_P = F @ y.filtered_cov
             J = hpsd_solve(y.predicted_cov, tmp_F_P, cholesky_matrix=predicted_cov_chol).T
 
@@ -493,7 +565,7 @@ class ExtendedStateSpaceModel:
             init_predicted_mean = init_predict_dist.mean()
             init_predicted_cov = init_F @ self.initial_state_prior.covariance() @ init_F.T + init_predict_dist.covariance()
 
-            t0 = t1 - jnp.asarray(1, jnp.int32)
+            t0 = t1 - jnp.asarray(self.dt, t1.dtype)
             y = FilterResult(
                 t=t0,
                 log_cumulative_marginal_likelihood=jnp.asarray(0.),
