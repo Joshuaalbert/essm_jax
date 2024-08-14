@@ -67,8 +67,7 @@ print(smooth_result)
 forward_samples = essm.forward_simulate(
     key=jax.random.PRNGKey(0),
     num_time=25,
-    observations=samples.observation,
-    mask=mask
+    filter_result=filter_result
 )
 
 import pylab as plt
@@ -86,9 +85,14 @@ plt.legend()
 plt.show()
 ```
 
+## Online Filtering
+
+Take a look at [examples](./docs/examples) to learn how to do online filtering, for interactive application.
+
 # Change Log
 
 13 August 2024: Initial release 1.0.0.
+14 August 2024: 1.0.1 released. Added sparse util. Add incremental API for online filtering. Arbitrary dt.
 
 ## Star History
 
