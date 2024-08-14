@@ -3,9 +3,9 @@ import time
 import jax
 import pytest
 
+jax.config.update('jax_enable_x64', True)
 from essm_jax.sparse import create_sparse_rep, matvec_sparse
 
-jax.config.update('jax_enable_x64', True)
 import numpy as np
 import tensorflow_probability.substrates.jax as tfp
 from jax import numpy as jnp
