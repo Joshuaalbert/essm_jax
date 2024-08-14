@@ -1,6 +1,11 @@
 import time
 
 import jax
+import pytest
+
+from essm_jax.sparse import create_sparse_rep, matvec_sparse
+
+jax.config.update('jax_enable_x64', True)
 import numpy as np
 import tensorflow_probability.substrates.jax as tfp
 from jax import numpy as jnp
@@ -217,19 +222,21 @@ def test_speed_test_jvp_essm():
     )
 
     sample = essm.sample(jax.random.PRNGKey(0), 1000)
-    filter_fn = jax.jit(lambda: essm.forward_filter(sample.observation)).lower().compile()
-    filter_jvp_fn = jax.jit(lambda: essm_jvp.forward_filter(sample.observation)).lower().compile()
+    filter_fn = jax.jit(
+        lambda: essm.forward_filter(sample.observation, marginal_likelihood_only=True)).lower().compile()
+    filter_jvp_fn = jax.jit(
+        lambda: essm_jvp.forward_filter(sample.observation, marginal_likelihood_only=True)).lower().compile()
 
     t0 = time.time()
     filter_results = filter_fn()
-    filter_results.t.block_until_ready()
+    filter_results.block_until_ready()
     t1 = time.time()
     dt1 = t1 - t0
     print(f"Time for essm: {t1 - t0}")
 
     t0 = time.time()
     filter_results_jvp = filter_jvp_fn()
-    filter_results_jvp.t.block_until_ready()
+    filter_results_jvp.block_until_ready()
     t1 = time.time()
     dt2 = t1 - t0
     print(f"Time for essm_jvp: {t1 - t0}")
@@ -282,8 +289,7 @@ def test_essm_forward_simulation():
     forward_samples = essm.forward_simulate(
         key=jax.random.PRNGKey(0),
         num_time=25,
-        observations=samples.observation,
-        mask=mask
+        filter_result=filter_result
     )
 
     try:
@@ -313,3 +319,118 @@ def test__efficienct_add_scalar_diag():
     A = jnp.eye(100)
     c = 1.
     assert jnp.all(_efficient_add_scalar_diag(A, c) == A + c * jnp.eye(100))
+
+
+def test_incremental_filtering():
+    def transition_fn(z, t):
+        mean = z + z * jnp.sin(2 * jnp.pi * t / 10)
+        cov = 0.1 * jnp.eye(np.size(z))
+        return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
+
+    def observation_fn(z, t):
+        mean = z
+        cov = t * 0.01 * jnp.eye(np.size(z))
+        return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
+
+    n = 1
+
+    initial_state_prior = tfpd.MultivariateNormalTriL(jnp.zeros(n), jnp.eye(n))
+
+    essm = ExtendedStateSpaceModel(
+        transition_fn=transition_fn,
+        observation_fn=observation_fn,
+        initial_state_prior=initial_state_prior,
+        materialise_jacobians=False,  # Fast
+        more_data_than_params=False  # if observation is bigger than latent we can speed it up.
+    )
+    samples = essm.sample(jax.random.PRNGKey(0), 100)
+
+    filter_result = essm.forward_filter(samples.observation)
+
+    filter_state = essm.create_initial_filter_state()
+
+    import pylab as plt
+
+    for i in range(100):
+        filter_state, _ = essm.incremental_update(filter_state, samples.observation[i])
+        plt.scatter(filter_state.t, filter_state.filtered_mean, c='black')
+        assert filter_state.t == filter_result.t[i]
+        filter_state = essm.incremental_predict(filter_state)
+        # print(i, np.abs(
+        #     filter_state.log_cumulative_marginal_likelihood - filter_result.log_cumulative_marginal_likelihood[i]))
+        # print(i, np.max(np.abs(filter_state.filtered_mean - filter_result.predicted_mean[i])))
+        # print(i, np.max(np.abs(filter_state.filtered_cov - filter_result.predicted_cov[i])))
+        # print(i, np.max(np.abs(filter_state.filtered_cov)))
+        np.testing.assert_allclose(filter_state.log_cumulative_marginal_likelihood,
+                                   filter_result.log_cumulative_marginal_likelihood[i], atol=1e-5)
+        np.testing.assert_allclose(filter_state.filtered_mean, filter_result.predicted_mean[i], atol=1e-5)
+        np.testing.assert_allclose(filter_state.filtered_cov, filter_result.predicted_cov[i], atol=1e-5)
+
+    plt.plot(filter_result.t, filter_result.filtered_mean[:, 0], label='filtered latent')
+    plt.legend()
+    plt.show()
+
+
+@pytest.mark.parametrize('use_sparse', [False, True])
+def test_performance_sparse(use_sparse: bool):
+    # Show that using sparse rep speeds up linear system
+    n = 128
+    k = 10
+    m = np.zeros((n, n))
+    rows = np.random.randint(n, size=k)
+    cols = np.random.randint(n, size=k)
+    m[rows, cols] += 1.
+
+    if use_sparse:
+        m = create_sparse_rep(m)
+    else:
+        m = jnp.asarray(m)
+
+    def transition_fn(z, t):
+        if use_sparse:
+            mean = matvec_sparse(m, z)
+        else:
+            mean = m @ z
+        scale = jnp.ones(np.size(z))
+        return tfpd.MultivariateNormalDiag(mean, scale)
+
+    def observation_fn(z, t):
+        mean = z
+        scale = jnp.ones(np.size(z))
+        return tfpd.MultivariateNormalDiag(mean, scale)
+
+    initial_state_prior = tfpd.MultivariateNormalTriL(jnp.zeros(n), jnp.eye(n))
+
+    essm = ExtendedStateSpaceModel(
+        transition_fn=transition_fn,
+        observation_fn=observation_fn,
+        initial_state_prior=initial_state_prior,
+        materialise_jacobians=True
+    )
+
+    essm_jvp = ExtendedStateSpaceModel(
+        transition_fn=transition_fn,
+        observation_fn=observation_fn,
+        initial_state_prior=initial_state_prior,
+        materialise_jacobians=False
+    )
+
+    sample = essm.sample(jax.random.PRNGKey(0), 512)
+    filter_fn = jax.jit(
+        lambda: essm.forward_filter(sample.observation, marginal_likelihood_only=True)).lower().compile()
+    filter_jvp_fn = jax.jit(
+        lambda: essm_jvp.forward_filter(sample.observation, marginal_likelihood_only=True)).lower().compile()
+
+    t0 = time.time()
+    filter_results = filter_fn()
+    filter_results.block_until_ready()
+    t1 = time.time()
+    dt1 = t1 - t0
+    print(f"Time for essm(use_sparse={use_sparse}): {t1 - t0}")
+
+    t0 = time.time()
+    filter_results_jvp = filter_jvp_fn()
+    filter_results_jvp.block_until_ready()
+    t1 = time.time()
+    dt2 = t1 - t0
+    print(f"Time for essm_jvp(use_sparse={use_sparse}): {t1 - t0}")
