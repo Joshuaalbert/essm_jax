@@ -21,7 +21,7 @@ from essm_jax.essm import ExtendedStateSpaceModel
 tfpd = tfp.distributions
 
 
-def transition_fn(z, t):
+def transition_fn(z, t, t_next):
     mean = z + jnp.sin(2 * jnp.pi * t / 10 * z)
     cov = 0.1 * jnp.eye(np.size(z))
     return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))

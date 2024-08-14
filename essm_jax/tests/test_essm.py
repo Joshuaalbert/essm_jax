@@ -18,7 +18,7 @@ tfpd = tfp.distributions
 def test_extended_state_space_model():
     num_time = 10
 
-    def transition_fn(z, t):
+    def transition_fn(z, t, t_next):
         mean = 2 * z
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -137,7 +137,7 @@ def test_extended_state_space_model():
 
 
 def test_jvp_essm():
-    def transition_fn(z, t):
+    def transition_fn(z, t, t_next):
         mean = jnp.sin(2 * z)
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -193,7 +193,7 @@ def test_jvp_essm():
 
 
 def test_speed_test_jvp_essm():
-    def transition_fn(z, t):
+    def transition_fn(z, t, t_next):
         mean = jnp.sin(2 * z + t)
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -245,14 +245,14 @@ def test_speed_test_jvp_essm():
 
 
 def test_essm_forward_simulation():
-    def transition_fn(z, t):
+    def transition_fn(z, t, t_next):
         mean = z + jnp.sin(2 * jnp.pi * t / 10 * z)
         cov = 0.1 * jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
     def observation_fn(z, t):
         mean = z
-        cov = t * 0.01 * jnp.eye(np.size(z))
+        cov = 0.01 * jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
     n = 1
@@ -273,17 +273,19 @@ def test_essm_forward_simulation():
     # Suppose we only observe every 3rd observation
     mask = jnp.arange(T) % 3 != 0
 
-    # Marginal likelihood, p(x[:]) = prod_t p(x[t] | x[:t-1])
-    log_prob = essm.log_prob(samples.observation, mask=mask)
-    print(log_prob)
-
     # Filtered latent distribution, p(z[t] | x[:t])
     filter_result = essm.forward_filter(samples.observation, mask=mask)
+    assert np.all(np.isfinite(filter_result.log_cumulative_marginal_likelihood))
+    assert np.all(np.isfinite(filter_result.filtered_mean))
+
+    # Marginal likelihood, p(x[:]) = prod_t p(x[t] | x[:t-1])
+    log_prob = essm.log_prob(samples.observation, mask=mask)
+    assert log_prob == filter_result.log_cumulative_marginal_likelihood[-1]
 
     # Smoothed latent distribution, p(z[t] | x[:]), i.e. past latents given all future observations
     # Including new estimate for prior state p(z[0])
     smooth_result, posterior_prior = essm.backward_smooth(filter_result, include_prior=True)
-    print(smooth_result)
+    assert np.all(np.isfinite(smooth_result.smoothed_mean))
 
     # Forward simulate the model
     forward_samples = essm.forward_simulate(
@@ -322,7 +324,7 @@ def test__efficienct_add_scalar_diag():
 
 
 def test_incremental_filtering():
-    def transition_fn(z, t):
+    def transition_fn(z, t, t_next):
         mean = z + z * jnp.sin(2 * jnp.pi * t / 10)
         cov = 0.1 * jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -349,26 +351,14 @@ def test_incremental_filtering():
 
     filter_state = essm.create_initial_filter_state()
 
-    import pylab as plt
-
     for i in range(100):
-        filter_state, _ = essm.incremental_update(filter_state, samples.observation[i])
-        plt.scatter(filter_state.t, filter_state.filtered_mean, c='black')
-        assert filter_state.t == filter_result.t[i]
         filter_state = essm.incremental_predict(filter_state)
-        # print(i, np.abs(
-        #     filter_state.log_cumulative_marginal_likelihood - filter_result.log_cumulative_marginal_likelihood[i]))
-        # print(i, np.max(np.abs(filter_state.filtered_mean - filter_result.predicted_mean[i])))
-        # print(i, np.max(np.abs(filter_state.filtered_cov - filter_result.predicted_cov[i])))
-        # print(i, np.max(np.abs(filter_state.filtered_cov)))
+        filter_state, _ = essm.incremental_update(filter_state, samples.observation[i])
+        assert filter_state.t == filter_result.t[i]
         np.testing.assert_allclose(filter_state.log_cumulative_marginal_likelihood,
                                    filter_result.log_cumulative_marginal_likelihood[i], atol=1e-5)
-        np.testing.assert_allclose(filter_state.filtered_mean, filter_result.predicted_mean[i], atol=1e-5)
-        np.testing.assert_allclose(filter_state.filtered_cov, filter_result.predicted_cov[i], atol=1e-5)
-
-    plt.plot(filter_result.t, filter_result.filtered_mean[:, 0], label='filtered latent')
-    plt.legend()
-    plt.show()
+        np.testing.assert_allclose(filter_state.filtered_mean, filter_result.filtered_mean[i], atol=1e-5)
+        np.testing.assert_allclose(filter_state.filtered_cov, filter_result.filtered_cov[i], atol=1e-5)
 
 
 @pytest.mark.parametrize('use_sparse', [False, True])
@@ -386,7 +376,7 @@ def test_performance_sparse(use_sparse: bool):
     else:
         m = jnp.asarray(m)
 
-    def transition_fn(z, t):
+    def transition_fn(z, t, t_next):
         if use_sparse:
             mean = matvec_sparse(m, z)
         else:
