@@ -4,7 +4,7 @@ from typing import NamedTuple, Optional, Tuple
 import jax
 import tensorflow_probability.substrates.jax as tfp
 
-from src.essm_jax.essm import ExtendedStateSpaceModel, IncrementalFilterState
+from essm_jax.essm import ExtendedStateSpaceModel, IncrementalFilterState
 
 tfpd = tfp.distributions
 

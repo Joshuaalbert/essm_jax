@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from src.essm_jax.jvp_op import JVPLinearOp
+from essm_jax.jvp_op import JVPLinearOp
 
 
 @pytest.mark.parametrize('linearize', [True, False])

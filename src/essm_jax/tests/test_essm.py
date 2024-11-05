@@ -8,7 +8,7 @@ import numpy as np
 import tensorflow_probability.substrates.jax as tfp
 from jax import numpy as jnp
 
-from src.essm_jax.essm import ExtendedStateSpaceModel, _efficient_add_diag
+from essm_jax.essm import ExtendedStateSpaceModel, _efficient_add_diag
 
 tfpd = tfp.distributions
 

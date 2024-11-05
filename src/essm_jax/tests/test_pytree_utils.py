@@ -4,7 +4,7 @@ import jax
 import numpy as np
 from jax import numpy as jnp
 
-from src.essm_jax.pytee_utils import pytree_unravel
+from essm_jax.pytee_utils import pytree_unravel
 
 
 def test_pytree_unravel():
