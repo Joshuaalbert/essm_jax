@@ -11,7 +11,7 @@ from jax import lax
 from tensorflow_probability.python.internal.backend.jax.gen.linear_operator_diag import LinearOperatorDiag
 from tensorflow_probability.substrates.jax.math import hpsd_solve
 
-from essm_jax.jvp_op import JVPLinearOp
+from src.essm_jax.jvp_op import JVPLinearOp
 
 tfpd = tfp.distributions
 tfb = tfp.bijectors

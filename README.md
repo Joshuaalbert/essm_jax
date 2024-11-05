@@ -16,18 +16,18 @@ import numpy as np
 import tensorflow_probability.substrates.jax as tfp
 from jax import numpy as jnp
 
-from essm_jax.essm import ExtendedStateSpaceModel
+from src.essm_jax.essm import ExtendedStateSpaceModel
 
 tfpd = tfp.distributions
 
 
-def transition_fn(z, t, t_next):
+def transition_fn(z, t, t_next, *args):
     mean = z + jnp.sin(2 * jnp.pi * t / 10 * z)
     cov = 0.1 * jnp.eye(np.size(z))
     return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
 
-def observation_fn(z, t):
+def observation_fn(z, t, *args):
     mean = z
     cov = t * 0.01 * jnp.eye(np.size(z))
     return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
