@@ -1,14 +1,15 @@
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
-
-jax.config.update('jax_enable_x64', True)
 import numpy as np
 import pytest
 
 from essm_jax.jvp_op import JVPLinearOp
 
 
-def test_jvp_linear_op():
+@pytest.mark.parametrize('linearize', [True, False])
+def test_jvp_linear_op(linearize: bool):
     n = 4
     k = 10
     m = 2
@@ -16,9 +17,9 @@ def test_jvp_linear_op():
     def fn(x):
         return jnp.asarray([jnp.sum(jnp.sin(x) ** i) for i in range(m)])
 
-    x = jnp.arange(n).astype(float)
+    x = jnp.arange(n).astype(jnp.float32)
 
-    jvp_op = JVPLinearOp(fn)
+    jvp_op = JVPLinearOp(fn, linearize=linearize)
     jvp_op = jvp_op(x)
 
     x_space = jnp.ones((n, k))
@@ -58,14 +59,15 @@ def test_jvp_linear_op():
     def fn(x):
         return jnp.sum(jnp.sin(x))
 
-    jvp_op = JVPLinearOp(fn, primals=x)
+    jvp_op = JVPLinearOp(fn, primals=x, linearize=linearize)
     assert jvp_op.matvec(x_space[:, 0]).shape == ()
     assert jnp.allclose(jvp_op.matvec(x_space[:, 0]), jvp_op.to_dense() @ x_space[:, 0])
     assert jnp.allclose(jvp_op @ x_space[:, 0], jvp_op.to_dense() @ x_space[:, 0])
 
 
 @pytest.mark.parametrize('init_primals', [True, False])
-def test_multiple_primals(init_primals: bool):
+@pytest.mark.parametrize('linearize', [True, False])
+def test_multiple_primals(init_primals: bool, linearize: bool):
     n = 5
     k = 3
 
@@ -73,12 +75,12 @@ def test_multiple_primals(init_primals: bool):
     def fn(x, y):
         return jnp.stack([x * y, y, -y], axis=-1)  # [n, 3]
 
-    x = jnp.arange(n).astype(float)
-    y = jnp.arange(n).astype(float)
+    x = jnp.arange(n).astype(jnp.float32)
+    y = jnp.arange(n).astype(jnp.float32)
     if init_primals:
-        jvp_op = JVPLinearOp(fn, primals=(x, y))
+        jvp_op = JVPLinearOp(fn, primals=(x, y), linearize=linearize)
     else:
-        jvp_op = JVPLinearOp(fn)
+        jvp_op = JVPLinearOp(fn, linearize=linearize)
         jvp_op = jvp_op(x, y)
     x_space = jnp.ones((n, k))
     y_space = jnp.ones((n, k))
@@ -91,11 +93,12 @@ def test_multiple_primals(init_primals: bool):
         _ = (jvp_op @ (x_space, y_space)).shape == (n, 3, k)
 
 
-def test_jvp_op_dtype_promotion():
+@pytest.mark.parametrize('linearize', [True, False])
+def test_jvp_op_dtype_promotion(linearize: bool):
     def fn(x, y):
         return x + y + 0j
 
-    jvp_op = JVPLinearOp(fn, promote_dtypes=True)
+    jvp_op = JVPLinearOp(fn, promote_dtypes=True, linearize=linearize)
 
     primals = (jnp.ones(1), jnp.ones(1))
     jvp_op = jvp_op(*primals)
@@ -104,3 +107,72 @@ def test_jvp_op_dtype_promotion():
 
     np.testing.assert_allclose(jvp_op.matvec(fn(*primals).astype(jnp.float32), adjoint=True),
                                jvp_op.matvec(fn(*primals), adjoint=True))
+
+
+@pytest.mark.parametrize('linearize', [True, False])
+def test_jvp_op_pytree_primals_and_cotangents(linearize: bool):
+    class Primal(NamedTuple):
+        x: jax.Array
+        y: jax.Array
+
+    class Cotangent(NamedTuple):
+        x: jax.Array
+        y: jax.Array
+        z: jax.Array
+
+    class Cotangent2(NamedTuple):
+        x: jax.Array
+        y: jax.Array
+        z: jax.Array
+        h: jax.Array
+
+    def f(x: Primal) -> tuple[Cotangent, Cotangent2]:
+        return Cotangent(x=x.x, y=x.y, z=x.x + x.y), Cotangent2(x=x.x, y=x.y, z=x.x + x.y, h=x.x - x.y)
+
+    F = JVPLinearOp(f, linearize=linearize)
+    primal = Primal(x=jnp.ones(2), y=jnp.ones(2))
+    F = F(primal)
+    cotangent = Cotangent(jnp.ones(2), jnp.ones(2), jnp.ones(2)), Cotangent2(jnp.ones(2), jnp.ones(2), jnp.ones(2),
+                                                                             jnp.ones(2))
+    tangent = Primal(jnp.ones(2), jnp.ones(2))
+
+    print(F.matvec(tangent))
+    print(F.matvec(*cotangent, adjoint=True))
+
+    def f(x: Primal, y: Primal) -> tuple[Cotangent, Cotangent2]:
+        return Cotangent(x=x.x, y=x.y, z=x.x + x.y + y.y), Cotangent2(x=x.x + y.x, y=x.y, z=x.x + x.y, h=x.x - x.y)
+
+    F = JVPLinearOp(f, linearize=linearize)
+    primal = Primal(x=jnp.ones(2), y=jnp.ones(2))
+    F = F(primal, primal)
+    cotangent = Cotangent(jnp.ones(2), jnp.ones(2), jnp.ones(2)), Cotangent2(jnp.ones(2), jnp.ones(2), jnp.ones(2),
+                                                                             jnp.ones(2))
+    tangent = Primal(jnp.ones(2), jnp.ones(2))
+
+    print(F.matvec(tangent, tangent))
+    print(F.matvec(*cotangent, adjoint=True))
+
+
+def test_linearize():
+    def f(x):
+        return jnp.sum(jnp.sin(x) ** 2) * jnp.cos(x)
+
+    x = jax.random.normal(jax.random.PRNGKey(0), (10,))
+    y = f(x)
+    g = JVPLinearOp(f, primals=x, linearize=False)
+    g_linear = JVPLinearOp(f, primals=x, linearize=True)
+
+    tangent = jax.random.normal(jax.random.PRNGKey(0), x.shape, x.dtype)
+    cotangent = jax.random.normal(jax.random.PRNGKey(0), y.shape, y.dtype)
+
+    jvp = g.matvec(tangent)
+    jvp_linear = g_linear.matvec(tangent)
+
+    print(jvp)
+    assert jnp.allclose(jvp, jvp_linear)
+
+    vjp = g.matvec(cotangent, adjoint=True)
+    vjp_linear = g_linear.matvec(cotangent, adjoint=True)
+
+    print(vjp)
+    assert jnp.allclose(vjp, vjp_linear)
