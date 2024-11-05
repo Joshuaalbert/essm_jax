@@ -13,7 +13,7 @@ def pytree_unravel(example_tree: PT) -> Tuple[Callable[[PT], jax.Array], Callabl
     Returns functions to ravel and unravel a pytree.
 
     Args:
-        example_tree: a pytree to be unravelled
+        example_tree: a pytree to be unravelled, can also be a pytree of ShapeDtypeStruct objects instead of arrays.
 
     Returns:
         ravel_fun: a function to ravel the pytree
