@@ -91,8 +91,12 @@ Take a look at [examples](./docs/examples) to learn how to do online filtering, 
 
 # Change Log
 
+5 November 2024: 1.0.2 released. Added conditional argument passing, dual EKF, better performance in diagonal transition
+and observation case. OU example.
+
+14 August 2024: 1.0.1 released. Add incremental API for online filtering. Arbitrary dt.
+
 13 August 2024: Initial release 1.0.0.
-14 August 2024: 1.0.1 released. Added sparse util. Add incremental API for online filtering. Arbitrary dt.
 
 ## Star History
 
