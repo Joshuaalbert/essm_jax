@@ -390,7 +390,8 @@ class ExtendedStateSpaceModel:
             filtered_cov=filtered_cov
         ), marginal_dist
 
-    def incremental_predict(self, filter_state: IncrementalFilterState, *theta, t_next: jax.Array | float | None = None) -> IncrementalFilterState:
+    def incremental_predict(self, filter_state: IncrementalFilterState, *theta,
+                            t_next: jax.Array | float | None = None) -> IncrementalFilterState:
         """
         Perform an incremental prediction step of the filter state, advancing the time index. I.e. produces
 
@@ -572,6 +573,7 @@ class ExtendedStateSpaceModel:
         )
 
         class XType(NamedTuple):
+            t_prev: jax.Array  # time t-1
             t: jax.Array  # time t
             filtered_mean: jax.Array  # [latent_size] mean of p(z[t] | x[:t])
             filtered_cov: jax.Array  # [latent_size, latent_size] covariance of p(z[t] | x[:t])
@@ -582,7 +584,7 @@ class ExtendedStateSpaceModel:
             """
             A single step of the backward equations.
             """
-            Fop = self.get_transition_jacobian(x.t - self.dt, x.t, *theta)
+            Fop = self.get_transition_jacobian(x.t_prev, x.t, *theta)
             F = Fop(x.filtered_mean)
             if self.materialise_jacobians:
                 F = F.to_dense()
@@ -630,6 +632,7 @@ class ExtendedStateSpaceModel:
             )
 
         xs = XType(
+            t_prev=filter_result.t - self.dt,
             t=filter_result.t,
             filtered_mean=filter_result.filtered_mean,
             filtered_cov=filter_result.filtered_cov,
@@ -639,9 +642,12 @@ class ExtendedStateSpaceModel:
         if include_prior:
             # prepend the initial state
             t0 = xs.t[0] - self.dt
+            t = jnp.concatenate([jnp.asarray(t0)[None], xs.t], axis=0)
+            t_prev = t - self.dt
             init_filter_state = self.create_initial_filter_state(t0=t0)
             init_predict_state = self.incremental_predict(init_filter_state, *theta)
             xs = XType(
+                t_prev=t_prev,
                 t=jnp.concatenate([jnp.asarray(t0)[None], xs.t], axis=0),
                 filtered_mean=jnp.concatenate([init_filter_state.filtered_mean[None], xs.filtered_mean], axis=0),
                 filtered_cov=jnp.concatenate([init_filter_state.filtered_cov[None], xs.filtered_cov], axis=0),
