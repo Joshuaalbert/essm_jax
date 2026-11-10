@@ -16,7 +16,6 @@ def test_pytree_unravel():
     assert isinstance(unravel_fun(flat), dict)
     assert jnp.allclose(unravel_fun(flat)['a'], example_tree['a'])
     assert jnp.allclose(unravel_fun(flat)['b'], example_tree['b'])
-
     # with named tuple
     class State(NamedTuple):
         a: np.ndarray
@@ -45,3 +44,17 @@ def test_pytree_unravel():
     assert isinstance(unravel_fun(flat), dict)
     assert jnp.allclose(unravel_fun(flat)['a'], example_tree['a'])
     assert jnp.allclose(unravel_fun(flat)['b'], example_tree['b'])
+
+
+def test_pytree_unravel_preserves_mixed_leaf_dtypes_under_jit():
+    example = {
+        "counts": jnp.array([1, 3], dtype=jnp.int16),
+        "values": jnp.array([[0.5], [2.5]], dtype=jnp.float32),
+    }
+    ravel, unravel = pytree_unravel(example)
+    restored = jax.jit(lambda tree: unravel(ravel(tree)))(example)
+    assert jax.tree.structure(restored) == jax.tree.structure(example)
+    for key, expected in example.items():
+        assert restored[key].dtype == expected.dtype
+        assert restored[key].shape == expected.shape
+        np.testing.assert_array_equal(restored[key], expected)

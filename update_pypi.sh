@@ -1,21 +1,18 @@
 #!/bin/bash
+set -euo pipefail
 
-# remove any previously created distribution files
-rm -rf dist/
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--upload" ) ]]; then
+    printf 'Usage: %s [--upload]\n' "$0" >&2
+    exit 2
+fi
 
-# create a new virtual environment
-python -m venv env
-source env/bin/activate
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+release_dir=$(mktemp -d "${TMPDIR:-/tmp}/essm-jax-dist.XXXXXX")
 
-# upgrade pip, setuptools, wheel, and twine
-pip install --upgrade pip setuptools wheel twine
+conda run -n essm_py python -m build --outdir "$release_dir"
+conda run -n essm_py python -m twine check --strict "$release_dir"/*
+printf 'Checked distributions: %s\n' "$release_dir"
 
-# build the project
-python setup.py sdist bdist_wheel
-
-# check and upload
-twine check dist/* && twine upload dist/*
-
-# deactivate and remove the virtual environment
-deactivate
-rm -rf env/
+if [[ "${1:-}" == "--upload" ]]; then
+    conda run -n essm_py python -m twine upload "$release_dir"/*
+fi
