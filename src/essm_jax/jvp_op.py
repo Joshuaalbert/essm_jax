@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import inspect
 import os
@@ -22,8 +23,8 @@ def get_grandparent_info(relative_depth: int = 7):
     """
     # Get the grandparent frame (caller of the caller)
     s = []
-    for depth in range(1, min(1 + relative_depth, len(inspect.stack()) - 1) + 1):
-        caller_frame = inspect.stack()[depth]
+    stack = inspect.stack(context=0)
+    for caller_frame in stack[1:relative_depth + 2]:
         caller_file = caller_frame.filename
         caller_line = caller_frame.lineno
         caller_func = caller_frame.function
@@ -93,7 +94,7 @@ class JVPLinearOp:
             if isinstance_namedtuple(self.primals) or (not isinstance(self.primals, tuple)):
                 self.primals = (self.primals,)
             if self.linearize:
-                self.linear_fn = make_linear(self.fn, *self.primals)
+                self._primals_out, self._jvp_fn = jax.linearize(self.fn, *self.primals)
 
     def __call__(self, *primals: Any) -> 'JVPLinearOp':
         return JVPLinearOp(
@@ -107,7 +108,7 @@ class JVPLinearOp:
 
     def __neg__(self):
         return JVPLinearOp(
-            fn=lambda *args, **kwargs: jax.lax.neg(self.fn(*args, **kwargs)),
+            fn=lambda *args, **kwargs: jax.tree.map(jax.lax.neg, self.fn(*args, **kwargs)),
             primals=self.primals,
             more_outputs_than_inputs=self.more_outputs_than_inputs,
             adjoint=self.adjoint,
@@ -122,8 +123,8 @@ class JVPLinearOp:
                 'Use .matmul(...) for general tangents.'
             )
         if len(np.shape(other)) == 1:
-            return self.matvec(other, adjoint=self.adjoint)
-        return self.matmul(other, adjoint=self.adjoint, left_multiply=True)
+            return self.matvec(other)
+        return self.matmul(other, left_multiply=True)
 
     def __rmatmul__(self, other):
         if not isinstance(other, (jax.Array, np.ndarray)):
@@ -132,19 +133,16 @@ class JVPLinearOp:
                 'Use .matmul(..., left_multiply=False) for general tangents.'
             )
         if len(np.shape(other)) == 1:
-            return self.matvec(other, adjoint=not self.adjoint)
-        return self.matmul(other, adjoint=not self.adjoint, left_multiply=False)
+            return self.matvec(other, adjoint=True)
+        return self.matmul(other, adjoint=True, left_multiply=False)
 
     @property
     def T(self) -> 'JVPLinearOp':
-        return JVPLinearOp(
-            fn=self.fn,
-            primals=self.primals,
-            more_outputs_than_inputs=self.more_outputs_than_inputs,
-            adjoint=not self.adjoint,
-            promote_dtypes=self.promote_dtypes,
-            linearize=self.linearize
-        )
+        # Transposing changes the product direction, not the evaluation point.
+        # Reuse the linearization and its residuals without evaluating fn again.
+        transposed = copy.copy(self)
+        transposed.adjoint = not self.adjoint
+        return transposed
 
     def matmul(self, *tangents: Any, adjoint: bool = False, left_multiply: bool = True):
         """
@@ -153,8 +151,9 @@ class JVPLinearOp:
         Args:
             tangents: pytree of the same structure as the primals, but with appropriate more columns for adjoint=False,
                 or more rows for adjoint=True.
-            adjoint: if True, compute J.T @ v, else compute J @ v
-            left_multiply: if True, compute M @ J, else compute J @ M
+            adjoint: if True, transpose this operator for the products
+            left_multiply: if True, apply to columns (J @ M); otherwise apply to
+                rows (M @ J.T). With adjoint=True these become J.T @ M and M @ J.
 
         Returns:
             pytree of matching either f-space (output) or x-space (primals)
@@ -167,9 +166,6 @@ class JVPLinearOp:
             # M @ J.T or M @ J
             in_axes = 0
             out_axes = 0
-        if adjoint:
-            return jax.vmap(lambda *_tangent: self.matvec(*_tangent, adjoint=adjoint),
-                            in_axes=in_axes, out_axes=out_axes)(*tangents)
         return jax.vmap(lambda *_tangent: self.matvec(*_tangent, adjoint=adjoint),
                         in_axes=in_axes, out_axes=out_axes)(*tangents)
 
@@ -181,7 +177,8 @@ class JVPLinearOp:
         Args:
             tangents: if adjoint=False, then  pytree of the same structure as the primals, else pytree of the same
                 structure as the output.
-            adjoint: if True, compute J.T @ v, else compute J @ v
+            adjoint: if True, transpose this operator for the product; applying
+                adjoint=True to an already transposed operator recovers J @ v
 
         Returns:
             pytree of matching either f-space (output) if adjoint=False, else x-space (primals)
@@ -189,6 +186,7 @@ class JVPLinearOp:
         if self.primals is None:
             raise ValueError("The primal value must be set to compute the Jacobian.")
 
+        adjoint = adjoint != self.adjoint
         if adjoint:
             co_tangents = tangents
 
@@ -204,8 +202,8 @@ class JVPLinearOp:
 
             # v @ J
             if self.linearize:
-                f_vjp = jax.linear_transpose(self.linear_fn, *self.primals)
-                primals_out = jax.eval_shape(self.linear_fn, *self.primals)
+                f_vjp = jax.linear_transpose(self._jvp_fn, *self.primals)
+                primals_out = self._primals_out
             else:
                 primals_out, f_vjp = jax.vjp(self.fn, *self.primals)
 
@@ -225,7 +223,7 @@ class JVPLinearOp:
 
         def _promote_dtype(primal: jax.Array, dtype: jnp.dtype):
             if primal.dtype != dtype:
-                warnings.warn(f"Promoting primal dtype from {primal.dtype} to {dtype}, at {get_grandparent_info()}.")
+                warnings.warn(f"Promoting primal dtype from {primal.dtype} to {dtype}, {get_grandparent_info()}.")
             return primal.astype(dtype)
 
         def _get_result_type(primal: jax.Array):
@@ -235,23 +233,37 @@ class JVPLinearOp:
         if self.promote_dtypes:
             result_types = jax.tree.map(_get_result_type, primals)
             tangents = jax.tree.map(_promote_dtype, tangents, result_types)
-        # We use linearised function, so that repeated applications are cheaper.
+        # linearize already returns the tangent map; do not differentiate it again.
         if self.linearize:
-            primal_out, tangent_out = jax.jvp(self.linear_fn, primals, tangents)
-        else:
-            primal_out, tangent_out = jax.jvp(self.fn, primals, tangents)
+            return self._jvp_fn(*tangents)
+        _, tangent_out = jax.jvp(self.fn, primals, tangents)
         return tangent_out
 
-    def to_dense(self) -> jax.Array:
+    def to_dense(self) -> Any:
         """
         Compute the dense Jacobian at a point.
 
         Returns:
-            [m, n] array
+            [m, n] array (or [n, m] for a transpose) for vector inputs/outputs.
+            Structured inputs/outputs retain JAX's Jacobian pytree convention;
+            multiple positional inputs produce one block per argument.
         """
         if self.primals is None:
             raise ValueError("The primal value must be set to compute the Jacobian.")
 
-        if self.more_outputs_than_inputs:
-            return jax.jacfwd(self.fn)(*self.primals)
-        return jax.jacrev(self.fn)(*self.primals)
+        if self.adjoint:
+            primals_out = self._primals_out if self.linearize else jax.eval_shape(self.fn, *self.primals)
+            cotangent = jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), primals_out)
+
+            def transpose_product(cotangent):
+                if isinstance_namedtuple(cotangent) or not isinstance(cotangent, tuple):
+                    return self.matvec(cotangent)
+                return self.matvec(*cotangent)
+
+            jacobian = jax.jacrev if self.more_outputs_than_inputs else jax.jacfwd
+            return jacobian(transpose_product)(cotangent)
+
+        jacobian = jax.jacfwd if self.more_outputs_than_inputs else jax.jacrev
+        argnums = 0 if len(self.primals) == 1 else tuple(range(len(self.primals)))
+        fn = self._jvp_fn if self.linearize else self.fn
+        return jacobian(fn, argnums=argnums)(*self.primals)

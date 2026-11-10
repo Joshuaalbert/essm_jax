@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from essm_jax.jvp_op import JVPLinearOp
+from essm_jax.jvp_op import JVPLinearOp, make_linear
 
 
 @pytest.mark.parametrize('linearize', [True, False])
@@ -176,3 +176,70 @@ def test_linearize():
 
     print(vjp)
     assert jnp.allclose(vjp, vjp_linear)
+
+
+@pytest.mark.parametrize('linearize', [True, False])
+@pytest.mark.parametrize('more_outputs_than_inputs', [True, False])
+def test_transpose_methods_and_higher_derivatives(linearize, more_outputs_than_inputs):
+    def fn(x):
+        return jnp.array([jnp.sin(x[0]) * x[1], jnp.exp(x[2]) + x[0] ** 2])
+
+    x = jnp.array([0.2, 0.7, -0.3])
+    tangent = jnp.array([0.1, -0.2, 0.4])
+    cotangent = jnp.array([0.3, -0.5])
+    dense = jax.jacrev(fn)(x)
+    op = JVPLinearOp(fn, primals=x, linearize=linearize, more_outputs_than_inputs=more_outputs_than_inputs)
+    np.testing.assert_allclose(op.T.to_dense(), dense.T, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(op.T.matvec(cotangent), dense.T @ cotangent, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(op.T.matmul(cotangent[:, None]), dense.T @ cotangent[:, None])
+    np.testing.assert_allclose(op.T.matvec(tangent, adjoint=True), dense @ tangent, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(op.T.T.to_dense(), dense)
+
+    def loss(primal):
+        operator = JVPLinearOp(fn, primals=primal, linearize=linearize)
+        return jnp.sum((operator @ tangent) ** 2) + jnp.sum((operator.T @ cotangent) ** 2)
+
+    def reference_loss(primal):
+        jacobian = jax.jacrev(fn)(primal)
+        return jnp.sum((jacobian @ tangent) ** 2) + jnp.sum((jacobian.T @ cotangent) ** 2)
+
+    np.testing.assert_allclose(jax.jit(jax.grad(loss))(x), jax.grad(reference_loss)(x), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(jax.jit(jax.hessian(loss))(x), jax.hessian(reference_loss)(x), rtol=1e-12, atol=1e-12)
+
+
+def test_dense_multiple_primals_includes_every_argument():
+    def fn(x, y):
+        return x ** 2 + 3 * y
+
+    x, y = jnp.array([0.2, 0.3]), jnp.array([0.7, 0.8])
+    actual = JVPLinearOp(fn, primals=(x, y)).to_dense()
+    expected = jax.jacrev(fn, argnums=(0, 1))(x, y)
+    assert jax.tree.structure(actual) == jax.tree.structure(expected)
+    for result, reference in zip(actual, expected):
+        np.testing.assert_allclose(result, reference)
+
+
+@pytest.mark.parametrize('linearize', [True, False])
+def test_structured_transpose_jacobian(linearize):
+    def fn(x):
+        return x ** 2, jnp.sum(jnp.sin(x))
+
+    x = jnp.array([0.2, -0.3])
+    cotangent = (jnp.array([0.1, 0.7]), jnp.array(0.5))
+    op = JVPLinearOp(fn, primals=x, linearize=linearize)
+    _, pullback = jax.vjp(fn, x)
+    expected = jax.jacfwd(lambda cot: pullback(cot)[0])(cotangent)
+    actual = jax.jit(lambda primal: JVPLinearOp(fn, primals=primal, linearize=linearize).T.to_dense())(x)
+    assert jax.tree.structure(actual) == jax.tree.structure(expected)
+    for result, reference in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
+        np.testing.assert_allclose(result, reference, rtol=1e-12, atol=1e-12)
+    for actual, expected in zip((-op).matvec(x), jax.tree.map(jnp.negative, op.matvec(x))):
+        np.testing.assert_allclose(actual, expected)
+
+
+def test_make_linear_retains_affine_offset():
+    primal = jnp.array([0.2, -0.3])
+    delta = jnp.array([0.01, 0.02])
+    approximation = make_linear(jnp.sin, primal)
+    np.testing.assert_allclose(approximation(primal), jnp.sin(primal))
+    np.testing.assert_allclose(approximation(primal + delta), jnp.sin(primal) + jnp.cos(primal) * delta)

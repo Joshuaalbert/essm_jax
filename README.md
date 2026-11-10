@@ -27,6 +27,17 @@ wheel and uploads them as artifacts.
 `pytest` excludes the hardware-dependent timing benchmark by default. Run it
 explicitly with `conda run -n essm_py pytest -m benchmark`.
 
+For separate tracing, compilation, and synchronized execution timings, run:
+
+```bash
+JAX_PLATFORMS=cpu conda run -n essm_py python benchmarks/filtering.py --output /tmp/essm-benchmark
+```
+
+This writes JSON measurements, numerical outputs, and compiled HLO alongside
+the output prefix. Use `--size 128 --steps 1000` for the larger case and
+`--reference /tmp/baseline.npz` to check values and parameter gradients against
+another checkout. Measurements and their limits are recorded in [LEARNINGS.md](LEARNINGS.md).
+
 Read [AGENTS.md](AGENTS.md), [INVARIANTS.md](INVARIANTS.md), and
 [LEARNINGS.md](LEARNINGS.md) before making changes. Runtime requirements use
 `tfp-nightly` for the JAX substrate and allow NumPy 2 for modern Python versions.
