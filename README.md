@@ -5,6 +5,49 @@ linear space space models this is equivalent to the Kalman and Rauch-Tung-Strieb
 
 Support for Python 3.10+.
 
+## Development and CI
+
+Use the `essm_py` conda environment for local development:
+
+```bash
+conda run -n essm_py pip install -e '.[tests]'
+conda run -n essm_py pytest
+conda run -n essm_py pytest --cov --cov-config=pyproject.toml --cov-report=term-missing --cov-report=xml --cov-report=html
+conda run -n essm_py python -m flake8 src --select=E9,F63,F7,F82
+conda run -n essm_py ruff check src
+```
+
+The [CI workflow](.github/workflows/unittests.yml) runs on pull requests to `main`
+and `develop`, pushes to `main`, and manual dispatch. It tests Python 3.10–3.14
+on CPU, requires 80% combined line-and-branch coverage of production code, and
+uploads test results and XML/HTML coverage reports for each Python version.
+After the test matrix passes, it builds and checks the source distribution and
+wheel and uploads them as artifacts.
+
+`pytest` excludes the hardware-dependent timing benchmark by default. Run it
+explicitly with `conda run -n essm_py pytest -m benchmark`.
+
+For separate tracing, compilation, and synchronized execution timings, run:
+
+```bash
+JAX_PLATFORMS=cpu conda run -n essm_py python benchmarks/filtering.py --output /tmp/essm-benchmark
+```
+
+This writes JSON measurements, numerical outputs, and compiled HLO alongside
+the output prefix. Use `--size 128 --steps 1000` for the larger case and
+`--reference /tmp/baseline.npz` to check values and parameter gradients against
+another checkout. Measurements and their limits are recorded in [LEARNINGS.md](LEARNINGS.md).
+
+Read [AGENTS.md](AGENTS.md), [INVARIANTS.md](INVARIANTS.md), and
+[LEARNINGS.md](LEARNINGS.md) before making changes. Runtime requirements use
+`tfp-nightly` for the JAX substrate and allow NumPy 2 for modern Python versions.
+All packaging and dependencies are declared in `pyproject.toml`, including the
+`tests` and `examples` extras; no setup script or requirements files are needed.
+
+Releases remain manual. `bash update_pypi.sh` builds and checks distributions in
+a fresh temporary directory using `essm_py`; `bash update_pypi.sh --upload` also
+uploads those checked files to PyPI using your configured Twine credentials.
+
 ## Example
 
 All you need to do is define the transition and observation functions, and the initial state prior. These are all in

@@ -1,4 +1,0 @@
-jax
-jaxlib
-numpy<2
-tensorflow_probability

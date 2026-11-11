@@ -1,10 +1,8 @@
 import time
 
 import jax
-
-jax.config.update('jax_enable_x64', True)
-
 import numpy as np
+import pytest
 import tensorflow_probability.substrates.jax as tfp
 from jax import numpy as jnp
 
@@ -190,6 +188,7 @@ def test_jvp_essm():
     assert jnp.allclose(smoothed_prior.covariance, smoothed_prior_jvp.covariance)
 
 
+@pytest.mark.benchmark
 def test_speed_test_jvp_essm():
     def transition_fn(z, t, t_next, *args):
         mean = jnp.sin(2 * z + t)

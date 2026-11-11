@@ -45,8 +45,8 @@ class FilterResult(NamedTuple):
 class IncrementalFilterState(NamedTuple):
     t: jax.Array  # the time index
     log_cumulative_marginal_likelihood: jax.Array  # log marginal likelihood prod_t p(x[t] | x[:t-1])
-    filtered_mean: jax.Array  # [latent_size] mean of p(z[t+1] | x[:t])
-    filtered_cov: jax.Array  # [latent_size, latent_size] covariance of p(z[t+1] | x[:t])
+    filtered_mean: jax.Array  # [latent_size] state mean at t, before or after its observation update
+    filtered_cov: jax.Array  # [latent_size, latent_size] state covariance at t
 
 
 class SmoothingResult(NamedTuple):
@@ -67,13 +67,13 @@ class InitialPrior(NamedTuple):
 
 def _efficient_add_diag(A: jax.Array, c: Union[jax.Array, float]) -> jax.Array:
     """
-    Efficiently add a scalar to the diagonal of a matrix.
+    Add a scalar or vector to the diagonal without constructing a dense matrix.
 
     Efficiently computes A + c * I, where A is a matrix and c is a scalar.
 
     Args:
         A: [n, n] array
-        c: scalar
+        c: scalar or [n] diagonal entries
 
     Returns:
         [n, n] array
@@ -243,14 +243,16 @@ class ExtendedStateSpaceModel:
             new_latent_key, obs_key = jax.random.split(key, 2)
             transition_dist = self.transition_fn(latent, t, t_next, *theta)
             new_latent = transition_dist.sample(seed=new_latent_key)
-            observation_dist = self.observation_fn(new_latent, t, *theta)
+            observation_dist = self.observation_fn(new_latent, t_next, *theta)
             new_observation = observation_dist.sample(seed=obs_key)
             return new_latent, SampleResult(t=t_next, latent=new_latent, observation=new_observation)
 
         # Sample at t0 forming initial state
         init = self.initial_state_prior.sample(seed=init_key)
-        t_from = jnp.arange(0, num_time) * self.dt + t0
-        t_to = t_from + self.dt
+        t0 = jnp.asarray(t0, dtype=jnp.result_type(t0, init))
+        dt = jnp.asarray(self.dt, dtype=t0.dtype)
+        t_from = jnp.arange(num_time, dtype=t0.dtype) * dt + t0
+        t_to = t_from + dt
         xs = (
             jax.random.split(latent_key, num_time),
             t_from,
@@ -334,7 +336,8 @@ class ExtendedStateSpaceModel:
         tmp_H_P = H @ filter_state.filtered_cov
         _S = tmp_H_P @ H.T  # [observation_size, observation_size]
         if isinstance(observation_dist.scale, LinearOperatorDiag):
-            R_diag = observation_dist.scale.diag_part()  # [observation_size]
+            # A diagonal scale contains standard deviations, not variances.
+            R_diag = jnp.square(observation_dist.scale.diag_part())  # [observation_size]
             S = _efficient_add_diag(_S, R_diag)  # [observation_size, observation_size]
         else:
             R = observation_dist.covariance()
@@ -343,7 +346,11 @@ class ExtendedStateSpaceModel:
         S_chol = lax.linalg.cholesky(S, symmetrize_input=False)  # [observation_size, observation_size]
 
         marginal_dist = tfpd.MultivariateNormalTriL(x_expectation, S_chol)
-        # return_marginal = tfpd.MultivariateNormalFullCovariance(x_expectation, S)
+
+        # Sanitize missing data before arithmetic: selecting the final state alone
+        # leaves NaN/Inf residuals in the reverse-mode derivative of the update.
+        if mask is not None:
+            observation = jnp.where(mask, x_expectation, observation)
 
         # Compute the log marginal likelihood p(x[t] | x[:t-1])
         log_marginal_likelihood = marginal_dist.log_prob(observation)
@@ -356,20 +363,14 @@ class ExtendedStateSpaceModel:
         filtered_mean = filter_state.filtered_mean + K @ (observation - x_expectation)  # [latent_size]
 
         # Update the state covariance using Joseph's form to ensure positive semi-definite
-        # tmp_factor = (I - K @ H)
-        if self.more_data_than_params:
-            tmp_factor = _efficient_add_diag((- K) @ H, 1.)
-        else:
-            tmp_factor = _efficient_add_diag(K @ (-H), 1.)
+        tmp_factor = _efficient_add_diag(-(K @ H), 1.)  # I - K @ H; reuse H's linearization
 
         _filtered_cov = tmp_factor @ filter_state.filtered_cov @ tmp_factor.T  # [latent_size, latent_size]
         if isinstance(observation_dist.scale, LinearOperatorDiag):
-            R_diag = observation_dist.scale.diag_part()  # [observation_size]
             # _other_part = K @ R @ K.T = (K * diag(R)) @ K.T (efficiently computed)
             _other_part = (K * R_diag) @ K.T  # [latent_size, latent_size]
             filtered_cov = _filtered_cov + _other_part
         else:
-            R = observation_dist.covariance()
             filtered_cov = _filtered_cov + K @ R @ K.T  # [latent_size, latent_size]
 
         # When masked, then the filtered state is the predicted state.
@@ -399,6 +400,7 @@ class ExtendedStateSpaceModel:
         Args:
             filter_state: the current filter state
             *theta: the parameters
+            t_next: explicit next time, or the current time plus dt when omitted
 
         Returns:
             the predicted filter state, with time index advanced
@@ -407,6 +409,8 @@ class ExtendedStateSpaceModel:
 
         if t_next is None:
             t_next = filter_state.t + jnp.asarray(self.dt, filter_state.t.dtype)
+        else:
+            t_next = jnp.asarray(t_next, dtype=jnp.result_type(t_next, filter_state.t))
 
         Fop = self.get_transition_jacobian(filter_state.t, t_next, *theta)
         F = Fop(filter_state.filtered_mean)
@@ -417,7 +421,7 @@ class ExtendedStateSpaceModel:
         predicted_mean = predicted_dist.mean()  # [latent_size]
         _predicted_cov = F @ filter_state.filtered_cov @ F.T  # [latent_size, latent_size]
         if isinstance(predicted_dist.scale, LinearOperatorDiag):
-            Q_diag = predicted_dist.scale.diag_part()
+            Q_diag = jnp.square(predicted_dist.scale.diag_part())
             predicted_cov = _efficient_add_diag(_predicted_cov, Q_diag)  # [latent_size, latent_size]
         else:
             Q = predicted_dist.covariance()  # [latent_size, latent_size]
@@ -439,14 +443,16 @@ class ExtendedStateSpaceModel:
                 from the first observation time.
 
         Returns:
-            the initial incremental filter state at the first possible observation time, i.e. t0+1.
+            the prior state at t0, before the first prediction or observation update
         """
-        # Push forward initial state to create p(z[1] | z[0])
-        t0 = jnp.asarray(t0, jnp.float32)
+        mean = self.initial_state_prior.mean()
+        # Python scalar times follow the model dtype; explicit higher-precision
+        # times retain that precision (e.g. absolute timestamps with short steps).
+        t0 = jnp.asarray(t0, dtype=jnp.result_type(t0, mean))
         return IncrementalFilterState(
             t=t0,
-            log_cumulative_marginal_likelihood=jnp.asarray(0.),
-            filtered_mean=self.initial_state_prior.mean(),
+            log_cumulative_marginal_likelihood=jnp.zeros((), dtype=mean.dtype),
+            filtered_mean=mean,
             filtered_cov=self.initial_state_prior.covariance()
         )
 
@@ -481,7 +487,9 @@ class ExtendedStateSpaceModel:
 
         num_time = np.shape(observations)[0]
 
-        def _filter_op(filter_state: IncrementalFilterState, y: YType) -> Tuple[IncrementalFilterState, FilterResult]:
+        def _filter_op(filter_state: IncrementalFilterState, y: YType) -> Tuple[
+            IncrementalFilterState, Optional[FilterResult]
+        ]:
             """
             A single step of the forward equations.
             """
@@ -498,6 +506,11 @@ class ExtendedStateSpaceModel:
 
             # Predict step, compute p(z[t+1] | x[:t])
             predicted_filter_state = self.incremental_predict(updated_filter_state, *theta)
+
+            # Avoid allocating the full O(T * (latent_size**2 + observation_size**2))
+            # history even when log_prob is called without an enclosing jit.
+            if marginal_likelihood_only:
+                return predicted_filter_state, None
 
             return predicted_filter_state, FilterResult(
                 t=updated_filter_state.t,
@@ -542,7 +555,7 @@ class ExtendedStateSpaceModel:
             t0: the time of initial state
 
         Returns:
-            [num_time] array of log probabilities
+            scalar total log probability of the observation sequence
         """
         return self.forward_filter(observations, *theta, mask=mask, marginal_likelihood_only=True, t0=t0)
 
@@ -582,7 +595,8 @@ class ExtendedStateSpaceModel:
             """
             A single step of the backward equations.
             """
-            Fop = self.get_transition_jacobian(x.t - self.dt, x.t, *theta)
+            # Each row predicts from its filtered time t to t + dt.
+            Fop = self.get_transition_jacobian(x.t, x.t + self.dt, *theta)
             F = Fop(x.filtered_mean)
             if self.materialise_jacobians:
                 F = F.to_dense()
@@ -612,7 +626,7 @@ class ExtendedStateSpaceModel:
 
             _smoothed_obs_cov = H @ smoothed_cov @ H.T
             if isinstance(observation_dist.scale, LinearOperatorDiag):
-                R_diag = observation_dist.scale.diag_part()
+                R_diag = jnp.square(observation_dist.scale.diag_part())
                 smoothed_obs_cov = _efficient_add_diag(_smoothed_obs_cov, R_diag)
             else:
                 R = observation_dist.covariance()
