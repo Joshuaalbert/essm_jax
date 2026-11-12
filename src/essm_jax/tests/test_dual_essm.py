@@ -11,12 +11,14 @@ tfpd = tfp.distributions
 
 @pytest.mark.parametrize("masked", [False, True])
 def test_dual_filter_coupling_and_mask(masked):
-    def transition(value, t, t_next, other):
+    def transition(value, t, t_next, args):
+        other, = args
         return tfpd.MultivariateNormalTriL(
             value + other * (t_next - t), jnp.array([[0.2]])
         )
 
-    def observation(value, t, other):
+    def observation(value, t, args):
+        other, = args
         return tfpd.MultivariateNormalTriL(value * other, jnp.array([[0.5]]))
 
     models = [

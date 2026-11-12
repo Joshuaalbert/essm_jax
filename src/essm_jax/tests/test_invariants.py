@@ -15,12 +15,13 @@ tfpd = tfp.distributions
 
 
 def _linear_model(materialise_jacobians=False):
-    def transition(z, t, t_next, drift):
+    def transition(z, t, t_next, args):
+        drift, = args
         return tfpd.MultivariateNormalTriL(
             0.8 * z + drift * (t_next - t), jnp.array([[0.4]])
         )
 
-    def observation(z, t, drift):
+    def observation(z, t, args):
         return tfpd.MultivariateNormalTriL(1.2 * z, jnp.array([[0.7]]))
 
     return ExtendedStateSpaceModel(
@@ -63,21 +64,21 @@ def test_filter_matches_scalar_kalman_reference(materialise_jacobians, missing):
 
     observations = jnp.asarray(observations[:, None])  # [num_time, observation_size]
     result = jax.jit(
-        lambda values: model.forward_filter(values, drift, mask=mask, t0=2.0)
+        lambda values: model.forward_filter(values, transition_args=(drift,), mask=mask, t0=2.0)
     )(observations)
     np.testing.assert_allclose(result.t, 2.0 + np.arange(1, 5) * model.dt)
     np.testing.assert_allclose(result.filtered_mean[:, 0], means, rtol=1e-6)
     np.testing.assert_allclose(result.filtered_cov[:, 0, 0], variances, rtol=1e-6)
     np.testing.assert_allclose(result.log_cumulative_marginal_likelihood, log_probs, rtol=1e-6)
-    np.testing.assert_allclose(model.log_prob(observations, drift, mask=mask, t0=2.0), log_prob)
+    np.testing.assert_allclose(model.log_prob(observations, transition_args=(drift,), mask=mask, t0=2.0), log_prob)
 
-    smoothed, prior = model.backward_smooth(result, drift, include_prior=True)
+    smoothed, prior = model.backward_smooth(result, transition_args=(drift,), include_prior=True)
     np.testing.assert_array_equal(smoothed.t, result.t)
     np.testing.assert_allclose(smoothed.smoothed_mean[-1], result.filtered_mean[-1])
     np.testing.assert_allclose(smoothed.smoothed_cov[-1], result.filtered_cov[-1])
     assert np.all(np.isfinite(prior.mean))
     assert np.all(prior.covariance >= 0)
-    posterior = model.posterior_marginals(observations, drift, mask=mask, t0=2.0)
+    posterior = model.posterior_marginals(observations, transition_args=(drift,), mask=mask, t0=2.0)
     np.testing.assert_allclose(posterior.smoothed_mean, smoothed.smoothed_mean)
     np.testing.assert_allclose(posterior.smoothed_cov, smoothed.smoothed_cov)
 
@@ -85,13 +86,13 @@ def test_filter_matches_scalar_kalman_reference(materialise_jacobians, missing):
 def test_missing_update_preserves_prediction_at_explicit_time():
     model = _linear_model()
     initial = model.create_initial_filter_state(t0=2.0)
-    predicted = model.incremental_predict(initial, 0.2, t_next=jnp.array(2.75))
+    predicted = model.incremental_predict(initial, transition_args=(0.2,), t_next=jnp.array(2.75))
     np.testing.assert_allclose(predicted.t, 2.75)
     np.testing.assert_allclose(predicted.filtered_mean, [0.8 * 0.3 + 0.2 * 0.75])
     np.testing.assert_allclose(predicted.filtered_cov, [[0.8 ** 2 * 1.1 ** 2 + 0.4 ** 2]])
 
     updated, _ = model.incremental_update(
-        predicted, jnp.array([np.nan]), 0.2, mask=jnp.array(True)
+        predicted, jnp.array([np.nan]), mask=jnp.array(True)
     )
     for actual, expected in zip(updated, predicted):
         np.testing.assert_array_equal(actual, expected)
@@ -99,7 +100,7 @@ def test_missing_update_preserves_prediction_at_explicit_time():
 
 def test_forward_simulation_agrees_for_batch_and_incremental_state():
     model = _linear_model()
-    filtered = model.forward_filter(jnp.zeros((3, 1)), 0.2, t0=2.0)
+    filtered = model.forward_filter(jnp.zeros((3, 1)), transition_args=(0.2,), t0=2.0)
     terminal = convert_filter_state_to_incremental_state(filtered)
     np.testing.assert_array_equal(terminal.filtered_mean, filtered.filtered_mean[-1])
     np.testing.assert_array_equal(terminal.filtered_cov, filtered.filtered_cov[-1])
@@ -108,8 +109,8 @@ def test_forward_simulation_agrees_for_batch_and_incremental_state():
         filtered.log_cumulative_marginal_likelihood[-1],
     )
     key = jax.random.PRNGKey(17)
-    batch_samples = model.forward_simulate(key, 3, filtered, 0.2)
-    incremental_samples = model.forward_simulate(key, 3, terminal, 0.2)
+    batch_samples = model.forward_simulate(key, 3, filtered, transition_args=(0.2,))
+    incremental_samples = model.forward_simulate(key, 3, terminal, transition_args=(0.2,))
     for batch, incremental in zip(batch_samples, incremental_samples):
         np.testing.assert_array_equal(batch, incremental)
     np.testing.assert_allclose(batch_samples.t, terminal.t + np.arange(1, 4) * model.dt)
@@ -125,4 +126,4 @@ def test_forward_simulation_agrees_for_batch_and_incremental_state():
 )
 def test_filter_rejects_invalid_observation_and_mask_shapes(observations, mask, message):
     with pytest.raises(ValueError, match=message):
-        _linear_model().forward_filter(observations, 0.2, mask=mask)
+        _linear_model().forward_filter(observations, transition_args=(0.2,), mask=mask)

@@ -29,7 +29,12 @@ dtype-appropriate tolerances; they are not promises of bitwise equivalence.
 ## Inference and missing data
 
 - Batch filtering agrees with applying the incremental predict/update API in
-  the documented order, including masks and parameters passed through `*theta`.
+  the documented order, including masks and separate callback argument tuples.
+- Model methods accept keyword-only `transition_args=()` and/or
+  `observation_args=()` according to the callbacks they use. Each callback
+  receives its tuple intact as its final positional argument, including an
+  empty tuple when no arguments are supplied. Callbacks unpack their own tuple;
+  transition arguments never reach the observation callback or vice versa.
 - `mask=True` means the observation is missing: the update preserves the incoming
   state mean/covariance and adds zero log likelihood. The transition still runs.
   Masked NaN/Inf observations do not contaminate values or derivatives; their
@@ -62,6 +67,8 @@ dtype-appropriate tolerances; they are not promises of bitwise equivalence.
   timestamp and the filtering time convention.
 - The tested filtering/operator paths remain usable under `jax.jit` and
   `jax.vmap`; do not convert traced array values into Python control flow.
+- Callback argument tuples may contain nested JAX pytrees. Their array leaves
+  remain differentiable through filtering and likelihood evaluation.
 - `materialise_jacobians=False` uses JVP/VJP products. Do not replace these with
   dense Jacobian construction in the hot path without performance evidence.
 - For real array inputs, `JVPLinearOp` products agree with the dense Jacobian;
@@ -77,6 +84,7 @@ dtype-appropriate tolerances; they are not promises of bitwise equivalence.
 - The dual filter updates the state using the old parameter estimate, then
   updates parameters using the new state estimate. Prediction uses both input
   estimates; it does not use one newly predicted estimate to predict the other.
+  The corresponding callbacks receive the other estimate in a one-element tuple.
 
 ## Development and release
 

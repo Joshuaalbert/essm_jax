@@ -50,8 +50,18 @@ uploads those checked files to PyPI using your configured Twine credentials.
 
 ## Example
 
-All you need to do is define the transition and observation functions, and the initial state prior. These are all in
-terms of `MultivariateNormalLinearOperator` distributions from `tensorflow_probability`.
+Define transition and observation callbacks and an initial state prior using
+`MultivariateNormalLinearOperator` distributions from `tensorflow_probability`.
+Pass callback inputs with the keyword-only `transition_args=()` and
+`observation_args=()` tuples. Each callback receives its own tuple as a single
+final argument and unpacks it as needed, even when the tuple is empty.
+
+This replaces the shared positional `*theta` API. When migrating, add an argument
+tuple parameter to each callback and move its inputs into the corresponding
+keyword. `incremental_predict` and transition Jacobian methods take only
+`transition_args`; `incremental_update` and observation Jacobian methods take
+only `observation_args`. Filtering, smoothing, likelihoods, and sampling take
+both. The tuples may contain nested JAX pytrees and differentiable arrays.
 
 ```python
 import jax
@@ -64,15 +74,17 @@ from essm_jax.essm import ExtendedStateSpaceModel
 tfpd = tfp.distributions
 
 
-def transition_fn(z, t, t_next, *args):
+def transition_fn(z, t, t_next, args):
+    process_variance, = args
     mean = z + jnp.sin(2 * jnp.pi * t / 10 * z)
-    cov = 0.1 * jnp.eye(np.size(z))
+    cov = process_variance * jnp.eye(np.size(z))
     return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
 
-def observation_fn(z, t, *args):
+def observation_fn(z, t, args):
+    variance_rate, = args
     mean = z
-    cov = t * 0.01 * jnp.eye(np.size(z))
+    cov = t * variance_rate * jnp.eye(np.size(z))
     return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
 
@@ -89,28 +101,44 @@ essm = ExtendedStateSpaceModel(
 )
 
 T = 100
-samples = essm.sample(jax.random.PRNGKey(0), num_time=T)
+transition_args = (0.1,)
+observation_args = (0.01,)
+samples = essm.sample(
+    jax.random.PRNGKey(0), num_time=T,
+    transition_args=transition_args, observation_args=observation_args,
+)
 
 # Suppose we only observe every 3rd observation
 mask = jnp.arange(T) % 3 != 0
 
 # Marginal likelihood, p(x[:]) = prod_t p(x[t] | x[:t-1])
-log_prob = essm.log_prob(samples.observation, mask=mask)
+log_prob = essm.log_prob(
+    samples.observation, mask=mask,
+    transition_args=transition_args, observation_args=observation_args,
+)
 print(log_prob)
 
 # Filtered latent distribution, p(z[t] | x[:t])
-filter_result = essm.forward_filter(samples.observation, mask=mask)
+filter_result = essm.forward_filter(
+    samples.observation, mask=mask,
+    transition_args=transition_args, observation_args=observation_args,
+)
 
 # Smoothed latent distribution, p(z[t] | x[:]), i.e. past latents given all future observations
 # Including new estimate for prior state p(z[0])
-smooth_result, posterior_prior = essm.backward_smooth(filter_result, include_prior=True)
+smooth_result, posterior_prior = essm.backward_smooth(
+    filter_result, include_prior=True,
+    transition_args=transition_args, observation_args=observation_args,
+)
 print(smooth_result)
 
 # Forward simulate the model
 forward_samples = essm.forward_simulate(
     key=jax.random.PRNGKey(0),
     num_time=25,
-    filter_result=filter_result
+    filter_result=filter_result,
+    transition_args=transition_args,
+    observation_args=observation_args,
 )
 
 import pylab as plt

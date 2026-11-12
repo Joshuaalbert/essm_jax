@@ -20,7 +20,8 @@ env:
 
 jobs:
   build:
-    name: Python ${{ matrix.python-version }}
+    # Keep these names aligned with main's required status checks.
+    name: build (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
