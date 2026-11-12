@@ -18,6 +18,9 @@ when the implementation changes; do not copy another project's numerical notes.
   it explicitly with `conda run -n essm_py pytest -m benchmark`.
 - Coverage is opt-in locally (`pytest --cov`) and required in CI. Its source
   selection and 80% minimum live in `pyproject.toml`.
+- Main's required GitHub checks are named `build (3.10)`, `build (3.11)`, and
+  `build (3.12)`. Preserve the workflow's `build (<version>)` display names so
+  successful matrix jobs satisfy branch protection.
 
 ## Numerical conventions
 
@@ -41,6 +44,11 @@ when the implementation changes; do not copy another project's numerical notes.
   `jit` can hide this allocation by eliminating the unused outputs.
 - The public helper module is named `pytee_utils.py` (historical spelling).
   Preserve that import path when doing unrelated work.
+- Transition and observation callbacks receive separate argument tuples intact,
+  including `()` when omitted. Nested array leaves remain dynamic and
+  differentiable under JAX transformations. To differentiate one scalar input
+  with `argnums`, wrap the keyword-only model method and pack that input into
+  the appropriate tuple, as in `benchmarks/filtering.py`.
 
 ## Performance measurements (2026-11-10)
 
@@ -92,8 +100,8 @@ not eliminate reverse-mode storage. Full filter output times now retain float64
 precision, adding four bytes per timestep relative to the old float32 timestamps.
 
 Reproduce a comparison by setting `PYTHONPATH` to each checkout's `src` in separate
-processes, running the benchmark with distinct `--output` prefixes, and passing
-the baseline `.npz` as `--reference` for the candidate run. JSON includes compiler
+processes, running that checkout's benchmark script with distinct `--output`
+prefixes, and passing the baseline `.npz` as `--reference` for the candidate run. JSON includes compiler
 argument, output, temporary, and alias memory estimates; `.hlo` files permit
 inspection of the compiled loops. These estimates do not include every runtime
 or library allocation and are not measurements of peak resident memory.

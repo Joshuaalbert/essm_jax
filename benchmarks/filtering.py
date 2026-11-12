@@ -29,15 +29,26 @@ identity = jnp.eye(n, dtype=jnp.float64)
 prior = tfp.distributions.MultivariateNormalTriL(jnp.zeros(n), identity)
 
 
-def transition(z, t, t_next, scale):
+def transition(z, t, t_next, args):
+    scale, = args
     return tfp.distributions.MultivariateNormalTriL(0.8 * z + 0.05 * jnp.sin(z), 0.3 * scale * identity)
 
 
-def observation(z, t, scale):
+def observation(z, t, args):
     return tfp.distributions.MultivariateNormalTriL(z + 0.1 * jnp.sin(z), 0.6 * identity)
 
 
 model = ExtendedStateSpaceModel(transition, observation, prior)
+
+
+def filter_with_scale(observations, scale):
+    return model.forward_filter(observations, transition_args=(scale,))
+
+
+def log_prob_with_scale(observations, scale):
+    return model.log_prob(observations, transition_args=(scale,))
+
+
 observations = jnp.sin(jnp.arange(steps * n, dtype=jnp.float64).reshape((steps, n)) * 0.01)
 scale = jnp.array(1., dtype=jnp.float64)
 jax.block_until_ready((observations, scale))
@@ -46,8 +57,8 @@ report = dict(platform=platform.platform(), jax=jax.__version__, jaxlib=jaxlib._
               observation_size=n, steps=steps, trace_repetitions=args.trace_repetitions,
               run_repetitions=args.run_repetitions)
 outputs = {}
-for name, fn in [('filter', model.forward_filter), ('log_prob', model.log_prob),
-                 ('value_and_grad', jax.value_and_grad(model.log_prob, argnums=1))]:
+for name, fn in [('filter', filter_with_scale), ('log_prob', log_prob_with_scale),
+                 ('value_and_grad', jax.value_and_grad(log_prob_with_scale, argnums=1))]:
     lowering_times, compile_times = [], []
     for _ in range(args.trace_repetitions):
         jax.clear_caches()
@@ -79,7 +90,7 @@ for name, fn in [('filter', model.forward_filter), ('log_prob', model.log_prob),
     print(name, report[name], flush=True)
 
 # Inspect the scan's outputs before an enclosing jit can eliminate unused history.
-program = jax.make_jaxpr(model.log_prob)(observations, scale)
+program = jax.make_jaxpr(log_prob_with_scale)(observations, scale)
 scans = [eq for eq in program.jaxpr.eqns if eq.primitive.name == 'scan']
 report['log_prob_scan_output_bytes'] = sum(
     int(np.prod(var.aval.shape)) * np.dtype(var.aval.dtype).itemsize

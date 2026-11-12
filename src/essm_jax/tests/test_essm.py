@@ -14,12 +14,12 @@ tfpd = tfp.distributions
 def test_extended_state_space_model():
     num_time = 10
 
-    def transition_fn(z, t, t_next, *args):
+    def transition_fn(z, t, t_next, args):
         mean = 2 * z
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
-    def observation_fn(z, t, *args):
+    def observation_fn(z, t, args):
         mean = z
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -133,12 +133,12 @@ def test_extended_state_space_model():
 
 
 def test_jvp_essm():
-    def transition_fn(z, t, t_next, *args):
+    def transition_fn(z, t, t_next, args):
         mean = jnp.sin(2 * z)
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
-    def observation_fn(z, t, *args):
+    def observation_fn(z, t, args):
         mean = jnp.exp(z)
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -190,12 +190,12 @@ def test_jvp_essm():
 
 @pytest.mark.benchmark
 def test_speed_test_jvp_essm():
-    def transition_fn(z, t, t_next, *args):
+    def transition_fn(z, t, t_next, args):
         mean = jnp.sin(2 * z + t)
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
-    def observation_fn(z, t, *args):
+    def observation_fn(z, t, args):
         mean = jnp.exp(z) - t
         cov = jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -242,12 +242,12 @@ def test_speed_test_jvp_essm():
 
 
 def test_essm_forward_simulation():
-    def transition_fn(z, t, t_next, *args):
+    def transition_fn(z, t, t_next, args):
         mean = z + jnp.sin(2 * jnp.pi * t / 10 * z)
         cov = 0.1 * jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
-    def observation_fn(z, t, *args):
+    def observation_fn(z, t, args):
         mean = z
         cov = 0.01 * jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
@@ -321,12 +321,12 @@ def test__efficienct_add_scalar_diag():
 
 
 def test_incremental_filtering():
-    def transition_fn(z, t, t_next, *args):
+    def transition_fn(z, t, t_next, args):
         mean = z + z * jnp.sin(2 * jnp.pi * t / 10)
         cov = 0.1 * jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))
 
-    def observation_fn(z, t, *args):
+    def observation_fn(z, t, args):
         mean = z
         cov = t * 0.01 * jnp.eye(np.size(z))
         return tfpd.MultivariateNormalTriL(mean, jnp.linalg.cholesky(cov))

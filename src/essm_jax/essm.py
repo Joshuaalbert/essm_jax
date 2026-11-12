@@ -1,7 +1,7 @@
 """Extended Gaussian State Space Model."""
 
 import dataclasses
-from typing import Callable, NamedTuple, Tuple, Union, Optional, Any
+from typing import Callable, NamedTuple, Tuple, Union, Optional
 
 import jax
 import jax.numpy as jnp
@@ -116,10 +116,12 @@ class ExtendedStateSpaceModel:
     Args:
         transition_fn: A function that computes the state transition distribution
             p(z(t') | z(t), t, t', theta). Must return a MultivariateNormalLinearOperator.
-            Call signature is `transition_fn(z(t), t, t', *theta)`, where z(t) is the previous state.
+            Call signature is `transition_fn(z(t), t, t', transition_args)`, where z(t) is the previous state.
+            The callback receives the argument tuple intact and unpacks it as needed.
         observation_fn: A function that computes the observation distribution
             p(x(t) | z(t), t, theta). Must return a MultivariateNormalLinearOperator.
-            Call signature is `observation_fn(z(t), t, *theta)`, where z(t) is the current state.
+            Call signature is `observation_fn(z(t), t, observation_args)`, where z(t) is the current state.
+            The callback receives the argument tuple intact and unpacks it as needed.
             Note: t is the observation time, with t=t0 being the initial state.
         initial_state_prior: A distribution over the initial state p(z(t0)).
             Must be a MultivariateNormalLinearOperator.
@@ -127,8 +129,8 @@ class ExtendedStateSpaceModel:
         materialise_jacobians: If True, the Jacobians are materialised as dense matrices.
         dt: The time step size, default is 1, and in general the output t[i] = t0 + (i+1) * dt
     """
-    transition_fn: Callable[[jax.Array, jax.Array, jax.Array, Any], tfpd.MultivariateNormalLinearOperator]
-    observation_fn: Callable[[jax.Array, jax.Array, Any], tfpd.MultivariateNormalLinearOperator]
+    transition_fn: Callable[[jax.Array, jax.Array, jax.Array, tuple], tfpd.MultivariateNormalLinearOperator]
+    observation_fn: Callable[[jax.Array, jax.Array, tuple], tfpd.MultivariateNormalLinearOperator]
     initial_state_prior: tfpd.MultivariateNormalLinearOperator
     more_data_than_params: bool = False
     materialise_jacobians: bool = False
@@ -147,32 +149,33 @@ class ExtendedStateSpaceModel:
         self.latent_size = np.size(_initial_state_prior_mean)
         self.latent_shape = np.shape(_initial_state_prior_mean)
 
-    def get_transition_jacobian(self, t: jax.Array, t_next: jax.Array, *theta: Any) -> JVPLinearOp:
+    def get_transition_jacobian(self, t: jax.Array, t_next: jax.Array, *,
+                                transition_args: tuple = ()) -> JVPLinearOp:
         """
         Get the Jacobian of the transition function.
 
         Args:
             t: the current time
             t_next: the next time
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
 
         Returns:
             A JVPLinearOp instance representing the Jacobian of the transition function.
         """
 
         def _transition_fn(z):
-            return self.transition_fn(z, t, t_next, *theta).mean()
+            return self.transition_fn(z, t, t_next, transition_args).mean()
 
         return JVPLinearOp(_transition_fn, more_outputs_than_inputs=False)
 
-    def get_observation_jacobian(self, t: jax.Array, *theta: Any,
+    def get_observation_jacobian(self, t: jax.Array, *, observation_args: tuple = (),
                                  observation_size: Optional[int] = None) -> JVPLinearOp:
         """
         Get the Jacobian of the observation function.
 
         Args:
             t: the current time
-            *theta: the parameters
+            observation_args: tuple passed to the observation callback
             observation_size: the size of the observation, if different from the latent size
 
         Returns:
@@ -180,14 +183,15 @@ class ExtendedStateSpaceModel:
         """
 
         def _observation_fn(z):
-            return self.observation_fn(z, t, *theta).mean()
+            return self.observation_fn(z, t, observation_args).mean()
 
         more_data_than_params = self.more_data_than_params
         if observation_size is not None:
             more_data_than_params = self.latent_size < observation_size
         return JVPLinearOp(_observation_fn, more_outputs_than_inputs=more_data_than_params)
 
-    def transition_matrix(self, z, t, t_next, *theta):
+    def transition_matrix(self, z: jax.Array, t: jax.Array, t_next: jax.Array, *,
+                          transition_args: tuple = ()) -> jax.Array:
         """
         Compute the transition matrix of the linearised transition function.
 
@@ -195,37 +199,39 @@ class ExtendedStateSpaceModel:
             z: the current state
             t: the current time
             t_next: the next time
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
 
         Returns:
             [latent_size, latent_size] array
         """
-        Fop = self.get_transition_jacobian(t, t_next, *theta)
+        Fop = self.get_transition_jacobian(t, t_next, transition_args=transition_args)
         return Fop(z).to_dense()
 
-    def observation_matrix(self, z, t, *theta):
+    def observation_matrix(self, z: jax.Array, t: jax.Array, *, observation_args: tuple = ()) -> jax.Array:
         """
         Compute the observation matrix of the linearised observation function.
 
         Args:
             z: the current state
             t: the current time
-            *theta: the parameters
+            observation_args: tuple passed to the observation callback
 
         Returns:
             [observation_size, latent_size] array
         """
-        Hop = self.get_observation_jacobian(t, *theta)
+        Hop = self.get_observation_jacobian(t, observation_args=observation_args)
         return Hop(z).to_dense()
 
-    def sample(self, key, num_time: int, *theta, t0: Union[jax.Array, float] = 0.) -> SampleResult:
+    def sample(self, key: jax.Array, num_time: int, *, transition_args: tuple = (),
+               observation_args: tuple = (), t0: Union[jax.Array, float] = 0.) -> SampleResult:
         """
         Sample from the model.
 
         Args:
             key: a PRNGKey
             num_time: the number of time steps to sample
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
+            observation_args: tuple passed to the observation callback
             t0: the time of initial state
 
         Returns:
@@ -241,9 +247,9 @@ class ExtendedStateSpaceModel:
         def _sample_latents_op(latent, y):
             (key, t, t_next) = y
             new_latent_key, obs_key = jax.random.split(key, 2)
-            transition_dist = self.transition_fn(latent, t, t_next, *theta)
+            transition_dist = self.transition_fn(latent, t, t_next, transition_args)
             new_latent = transition_dist.sample(seed=new_latent_key)
-            observation_dist = self.observation_fn(new_latent, t_next, *theta)
+            observation_dist = self.observation_fn(new_latent, t_next, observation_args)
             new_observation = observation_dist.sample(seed=obs_key)
             return new_latent, SampleResult(t=t_next, latent=new_latent, observation=new_observation)
 
@@ -267,7 +273,8 @@ class ExtendedStateSpaceModel:
         return samples
 
     def forward_simulate(self, key: jax.Array, num_time: int,
-                         filter_result: Union[FilterResult | IncrementalFilterState], *theta) -> SampleResult:
+                         filter_result: FilterResult | IncrementalFilterState, *,
+                         transition_args: tuple = (), observation_args: tuple = ()) -> SampleResult:
         """
         Simulate from the model, from the end of a forward filtering pass.
 
@@ -275,7 +282,8 @@ class ExtendedStateSpaceModel:
             key: a PRNGKey
             num_time: the number of time steps to simulate
             filter_result: the result of the forward filtering pass, or incremental filter update.
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
+            observation_args: tuple passed to the observation callback
 
         Returns:
             sample result: num_time timesteps of forward simulated
@@ -304,9 +312,11 @@ class ExtendedStateSpaceModel:
             materialise_jacobians=self.materialise_jacobians,
             dt=self.dt
         )
-        return new_essm.sample(key, num_time, *theta, t0=t0)
+        return new_essm.sample(key, num_time, transition_args=transition_args,
+                               observation_args=observation_args, t0=t0)
 
-    def incremental_update(self, filter_state: IncrementalFilterState, observation: jax.Array, *theta,
+    def incremental_update(self, filter_state: IncrementalFilterState, observation: jax.Array, *,
+                           observation_args: tuple = (),
                            mask: Optional[jax.Array] = None) -> Tuple[
         IncrementalFilterState, tfpd.MultivariateNormalLinearOperator]:
         """
@@ -317,20 +327,21 @@ class ExtendedStateSpaceModel:
         Args:
             filter_state: the current filter state
             observation: [n] the observation at the current time
-            *theta: the parameters
+            observation_args: tuple passed to the observation callback
             mask: scalar, the mask at the current time, True for missing observations
 
         Returns:
             the updated filter state, and the marginal distribution of the observation p(x[t] | x[:t-1])
         """
 
-        Hop = self.get_observation_jacobian(filter_state.t, *theta, observation_size=observation.size)
+        Hop = self.get_observation_jacobian(filter_state.t, observation_args=observation_args,
+                                            observation_size=observation.size)
         H = Hop(filter_state.filtered_mean)
         if self.materialise_jacobians:
             H = H.to_dense()
 
         # Update step, compute p(z[t] | x[:t]) from p(z[t] | x[:t-1])
-        observation_dist = self.observation_fn(filter_state.filtered_mean, filter_state.t, *theta)
+        observation_dist = self.observation_fn(filter_state.filtered_mean, filter_state.t, observation_args)
         # Push-forward the prior (i.e. predictive) distribution to the observation space
         x_expectation = observation_dist.mean()  # [observation_size]
         tmp_H_P = H @ filter_state.filtered_cov
@@ -391,7 +402,8 @@ class ExtendedStateSpaceModel:
             filtered_cov=filtered_cov
         ), marginal_dist
 
-    def incremental_predict(self, filter_state: IncrementalFilterState, *theta, t_next: jax.Array | float | None = None) -> IncrementalFilterState:
+    def incremental_predict(self, filter_state: IncrementalFilterState, *, transition_args: tuple = (),
+                            t_next: jax.Array | float | None = None) -> IncrementalFilterState:
         """
         Perform an incremental prediction step of the filter state, advancing the time index. I.e. produces
 
@@ -399,7 +411,7 @@ class ExtendedStateSpaceModel:
 
         Args:
             filter_state: the current filter state
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
             t_next: explicit next time, or the current time plus dt when omitted
 
         Returns:
@@ -412,12 +424,12 @@ class ExtendedStateSpaceModel:
         else:
             t_next = jnp.asarray(t_next, dtype=jnp.result_type(t_next, filter_state.t))
 
-        Fop = self.get_transition_jacobian(filter_state.t, t_next, *theta)
+        Fop = self.get_transition_jacobian(filter_state.t, t_next, transition_args=transition_args)
         F = Fop(filter_state.filtered_mean)
         if self.materialise_jacobians:
             F = F.to_dense()
 
-        predicted_dist = self.transition_fn(filter_state.filtered_mean, filter_state.t, t_next, *theta)
+        predicted_dist = self.transition_fn(filter_state.filtered_mean, filter_state.t, t_next, transition_args)
         predicted_mean = predicted_dist.mean()  # [latent_size]
         _predicted_cov = F @ filter_state.filtered_cov @ F.T  # [latent_size, latent_size]
         if isinstance(predicted_dist.scale, LinearOperatorDiag):
@@ -456,7 +468,8 @@ class ExtendedStateSpaceModel:
             filtered_cov=self.initial_state_prior.covariance()
         )
 
-    def forward_filter(self, observations: jax.Array, *theta, mask: Optional[jax.Array] = None,
+    def forward_filter(self, observations: jax.Array, *, transition_args: tuple = (),
+                       observation_args: tuple = (), mask: Optional[jax.Array] = None,
                        marginal_likelihood_only: bool = False,
                        t0: Union[jax.Array, float] = 0.) -> Union[FilterResult, jax.Array]:
         """
@@ -470,7 +483,8 @@ class ExtendedStateSpaceModel:
 
         Args:
             observations: [num_time, observation_size] array of observations
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
+            observation_args: tuple passed to the observation callback
             mask: [num_time] array of masks, True for missing observations
             marginal_likelihood_only: if True only the marginal likelihood is returned
             t0: the time of initial state, default is 0, so first observation is at time `dt`.
@@ -500,12 +514,12 @@ class ExtendedStateSpaceModel:
             updated_filter_state, marginal_dist = self.incremental_update(
                 filter_state,
                 y.observation,
-                *theta,
+                observation_args=observation_args,
                 mask=y.mask if mask is not None else None
             )
 
             # Predict step, compute p(z[t+1] | x[:t])
-            predicted_filter_state = self.incremental_predict(updated_filter_state, *theta)
+            predicted_filter_state = self.incremental_predict(updated_filter_state, transition_args=transition_args)
 
             # Avoid allocating the full O(T * (latent_size**2 + observation_size**2))
             # history even when log_prob is called without an enclosing jit.
@@ -524,7 +538,7 @@ class ExtendedStateSpaceModel:
             )
 
         filter_state = self.create_initial_filter_state(t0=t0)
-        filter_state = self.incremental_predict(filter_state, *theta)  # Advance to first update time
+        filter_state = self.incremental_predict(filter_state, transition_args=transition_args)  # Advance to first update time
 
         if mask is None:
             _mask = jnp.zeros(num_time, dtype=jnp.bool_)  # dummy variable (we skip the mask select)
@@ -543,23 +557,27 @@ class ExtendedStateSpaceModel:
             return final_accumulate.log_cumulative_marginal_likelihood
         return filter_results
 
-    def log_prob(self, observations: jax.Array, *theta, mask: Optional[jax.Array] = None,
+    def log_prob(self, observations: jax.Array, *, transition_args: tuple = (),
+                 observation_args: tuple = (), mask: Optional[jax.Array] = None,
                  t0: jax.Array | float = 0.) -> jax.Array:
         """
         Compute the log probability of the observations under the model, p(x[:T] | theta).
 
         Args:
             observations: [num_time, observation_size] array of observations
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
+            observation_args: tuple passed to the observation callback
             mask: [num_time] array of masks, True for missing observations
             t0: the time of initial state
 
         Returns:
             scalar total log probability of the observation sequence
         """
-        return self.forward_filter(observations, *theta, mask=mask, marginal_likelihood_only=True, t0=t0)
+        return self.forward_filter(observations, transition_args=transition_args, observation_args=observation_args,
+                                   mask=mask, marginal_likelihood_only=True, t0=t0)
 
-    def backward_smooth(self, filter_result: FilterResult, *theta, include_prior: bool = False) -> Union[
+    def backward_smooth(self, filter_result: FilterResult, *, transition_args: tuple = (),
+                        observation_args: tuple = (), include_prior: bool = False) -> Union[
         SmoothingResult, Tuple[SmoothingResult, InitialPrior]]:
         """
         Run the backward smoothing pass, computing the smoothed latent distribution at each timestep,
@@ -567,7 +585,8 @@ class ExtendedStateSpaceModel:
 
         Args:
             filter_result: A `FilterResult` instance, with [num_time] batched arrays.
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
+            observation_args: tuple passed to the observation callback
             include_prior: if True, include the prior p(z0) in the smoothing pass.
 
         Returns:
@@ -596,7 +615,7 @@ class ExtendedStateSpaceModel:
             A single step of the backward equations.
             """
             # Each row predicts from its filtered time t to t + dt.
-            Fop = self.get_transition_jacobian(x.t, x.t + self.dt, *theta)
+            Fop = self.get_transition_jacobian(x.t, x.t + self.dt, transition_args=transition_args)
             F = Fop(x.filtered_mean)
             if self.materialise_jacobians:
                 F = F.to_dense()
@@ -615,9 +634,9 @@ class ExtendedStateSpaceModel:
             smoothed_cov = x.filtered_cov + J @ (carry.smoothed_cov - x.predicted_cov) @ J.T
 
             # Push-forward the smoothed distribution to the observation space
-            observation_dist = self.observation_fn(smoothed_mean, x.t, *theta)
+            observation_dist = self.observation_fn(smoothed_mean, x.t, observation_args)
 
-            Hop = self.get_observation_jacobian(x.t, *theta,
+            Hop = self.get_observation_jacobian(x.t, observation_args=observation_args,
                                                 observation_size=np.shape(filter_result.observation_mean)[1])
             H = Hop(smoothed_mean)
             if self.materialise_jacobians:
@@ -654,7 +673,7 @@ class ExtendedStateSpaceModel:
             # prepend the initial state
             t0 = xs.t[0] - self.dt
             init_filter_state = self.create_initial_filter_state(t0=t0)
-            init_predict_state = self.incremental_predict(init_filter_state, *theta)
+            init_predict_state = self.incremental_predict(init_filter_state, transition_args=transition_args)
             xs = XType(
                 t=jnp.concatenate([jnp.asarray(t0)[None], xs.t], axis=0),
                 filtered_mean=jnp.concatenate([init_filter_state.filtered_mean[None], xs.filtered_mean], axis=0),
@@ -681,7 +700,8 @@ class ExtendedStateSpaceModel:
 
         return smooth_results
 
-    def posterior_marginals(self, observations: jax.Array, *theta, mask: Optional[jax.Array] = None,
+    def posterior_marginals(self, observations: jax.Array, *, transition_args: tuple = (),
+                            observation_args: tuple = (), mask: Optional[jax.Array] = None,
                             t0: Union[jax.Array, float] = 0.) -> Union[
         SmoothingResult, Tuple[SmoothingResult, InitialPrior]]:
         """
@@ -689,15 +709,18 @@ class ExtendedStateSpaceModel:
 
         Args:
             observations: [num_time, observation_size] array of observations
-            *theta: the parameters
+            transition_args: tuple passed to the transition callback
+            observation_args: tuple passed to the observation callback
             mask: [num_time] array of masks, True for missing observations
             t0: the time of initial state
 
         Returns:
             A `SmoothingResult` instance, with [num_time] batched arrays.
         """
-        filter_result = self.forward_filter(observations, *theta, mask=mask, t0=t0)
-        return self.backward_smooth(filter_result, *theta, include_prior=False)
+        filter_result = self.forward_filter(observations, transition_args=transition_args,
+                                            observation_args=observation_args, mask=mask, t0=t0)
+        return self.backward_smooth(filter_result, transition_args=transition_args,
+                                     observation_args=observation_args, include_prior=False)
 
 
 def convert_filter_state_to_incremental_state(filter_result: FilterResult) -> IncrementalFilterState:

@@ -26,8 +26,8 @@ class DualExtendedStateSpaceModel:
     estimation, the normal ESSM can be used effectively.
 
     Args:
-        state_essm: the state ESSM, should accept the parameter as an input
-        param_essm: the parameter ESSM, should accept the state as an input
+        state_essm: the state ESSM; its callbacks receive ``(parameter_mean,)`` as their argument tuple
+        param_essm: the parameter ESSM; its callbacks receive ``(state_mean,)`` as their argument tuple
     """
     state_essm: ExtendedStateSpaceModel
     param_essm: ExtendedStateSpaceModel
@@ -55,13 +55,13 @@ class DualExtendedStateSpaceModel:
         state_filter_state, marginal_dist = self.state_essm.incremental_update(
             filter_state.state_filter_state,
             observation,
-            filter_state.param_filter_state.filtered_mean,
+            observation_args=(filter_state.param_filter_state.filtered_mean,),
             mask=mask
         )
         param_filter_state, _ = self.param_essm.incremental_update(
             filter_state.param_filter_state,
             observation,
-            state_filter_state.filtered_mean,
+            observation_args=(state_filter_state.filtered_mean,),
             mask=mask
         )
         return (
@@ -79,8 +79,12 @@ class DualExtendedStateSpaceModel:
         Returns:
             the updated filter state
         """
-        state_theta = filter_state.param_filter_state.filtered_mean
-        param_theta = filter_state.state_filter_state.filtered_mean
-        state_filter_state = self.state_essm.incremental_predict(filter_state.state_filter_state, state_theta)
-        param_filter_state = self.param_essm.incremental_predict(filter_state.param_filter_state, param_theta)
+        state_filter_state = self.state_essm.incremental_predict(
+            filter_state.state_filter_state,
+            transition_args=(filter_state.param_filter_state.filtered_mean,),
+        )
+        param_filter_state = self.param_essm.incremental_predict(
+            filter_state.param_filter_state,
+            transition_args=(filter_state.state_filter_state.filtered_mean,),
+        )
         return DualIncrementalFilterState(state_filter_state=state_filter_state, param_filter_state=param_filter_state)
